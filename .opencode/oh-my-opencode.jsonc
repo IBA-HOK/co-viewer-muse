@@ -1,0 +1,104 @@
+{
+  // opencode zen free専用: 全エージェントを muse-spark free に固定（クォータ切れ対策）
+  // variantを変えて負荷分散: xhigh=最重推論 / high=バランス / medium=軽量 / low=超軽量 / minimal=最小
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/oh-my-opencode.schema.json",
+  "agents": {
+    // メインオーケストレーター - 最も重い推論が必要
+    "sisyphus": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "xhigh"
+    },
+    // 自律実装ワーカー - 高バランス
+    "hephaestus": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "high"
+    },
+    // アーキテクチャ/デバッグ相談 - 高バランス、読み取り専用で深い推論
+    "oracle": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "high"
+    },
+    // ドキュメント/外部コード検索 - 軽量で高速回転
+    "librarian": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "medium"
+    },
+    // コードベース探索（grep）- 軽量高速
+    "explore": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "low"
+    },
+    // マルチモーダル - 中バランス
+    "multimodal-looker": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "medium"
+    },
+    // 戦略プランナー - 最重量
+    "prometheus": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "xhigh"
+    },
+    // プラン事前検証 - 最重量
+    "metis": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "xhigh"
+    },
+    // プランレビュー - 高
+    "momus": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "high"
+    },
+    // Atlas - 中
+    "atlas": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "medium"
+    },
+    // 軽量Sisyphus - 中
+    "sisyphus-junior": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "medium"
+    }
+  },
+  "categories": {
+    // フロント/デザイン - 高バランス（視覚的推論は重め）
+    "visual-engineering": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "high"
+    },
+    // 難易度高ロジック - 最重量
+    "ultrabrain": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "xhigh"
+    },
+    // 自律リサーチ+実装 - 最重量
+    "deep": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "xhigh"
+    },
+    // クリエイティブ - 高
+    "artistry": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "high"
+    },
+    // 単純修正 - 超軽量
+    "quick": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "low"
+    },
+    // 未分類（軽）- 低
+    "unspecified-low": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "low"
+    },
+    // 未分類（重）- 高
+    "unspecified-high": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "high"
+    },
+    // ライティング - 中
+    "writing": {
+      "model": "opencode/muse-spark-1.2-contributor-free",
+      "variant": "medium"
+    }
+  }
+}

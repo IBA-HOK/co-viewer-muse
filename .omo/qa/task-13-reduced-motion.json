@@ -1,0 +1,12 @@
+{
+  "matches": true,
+  "media": "(prefers-reduced-motion: reduce)",
+  "animationDuration": "1e-05s",
+  "transitionDuration": "1e-05s",
+  "allAnimationDurations": [
+    "1e-05s",
+    "1e-05s",
+    "1e-05s"
+  ],
+  "hasReducedMotionCSS": true
+}

@@ -1,0 +1,119 @@
+{
+  "cjkProbeExists": true,
+  "cjkProbeBox": "1212.0x15.0 scrollW=1212 clientW=1212",
+  "h1FontFamily": "DotGothic16, monospace",
+  "h1Overflow": "visible",
+  "samples": [
+    {
+      "tag": "HTML",
+      "text": "                                                                 Co-Viewer — P2P",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1270.0",
+      "h": "800.0",
+      "clipped": false
+    },
+    {
+      "tag": "HEAD",
+      "text": "                                                                 Co-Viewer — P2P",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "0.0",
+      "h": "0.0",
+      "clipped": false
+    },
+    {
+      "tag": "TITLE",
+      "text": "Co-Viewer — P2P 同時視聴",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "0.0",
+      "h": "0.0",
+      "clipped": false
+    },
+    {
+      "tag": "BODY",
+      "text": "     ◇READY · NO MEDIA⛶FULLCO-VIEWER●NOTHING INSPIRED · P2P SYNCHOSTINVITE◧ QRNI",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1270.0",
+      "h": "800.0",
+      "clipped": false
+    },
+    {
+      "tag": "DIV",
+      "text": "◇READY · NO MEDIA⛶FULLCO-VIEWER●NOTHING INSPIRED · P2P SYNCHOSTINVITE◧ QRNICKNAM",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1270.0",
+      "h": "800.0",
+      "clipped": false
+    },
+    {
+      "tag": "DIV",
+      "text": "◇READY · NO MEDIA⛶FULLCO-VIEWER●NOTHING INSPIRED · P2P SYNCHOSTINVITE◧ QRNICKNAM",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1270.0",
+      "h": "1877.5",
+      "clipped": false
+    },
+    {
+      "tag": "DIV",
+      "text": "CO-VIEWER●NOTHING INSPIRED · P2P SYNCHOSTINVITE◧ QRNICKNAMEROOM co-vieweROOM · J",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1270.0",
+      "h": "1160.3",
+      "clipped": false
+    },
+    {
+      "tag": "DIV",
+      "text": "QUEUE0 ITEMS‹ PREVNEXT ›◇EMPTY · QUEUEBROWSER— CLOSEYOUTUBENICOLOAD / SEARCH関連順再",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1238.0",
+      "h": "894.0",
+      "clipped": false
+    },
+    {
+      "tag": "DIV",
+      "text": "BROWSER— CLOSEYOUTUBENICOLOAD / SEARCH関連順再生数順            MOCK SEARCH RESULTS — さ",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1238.0",
+      "h": "438.0",
+      "clipped": false
+    },
+    {
+      "tag": "DIV",
+      "text": "BROWSER— CLOSEYOUTUBENICOLOAD / SEARCH関連順再生数順            MOCK SEARCH RESULTS — さ",
+      "overflow": "visible",
+      "textOverflow": "clip",
+      "fontFamily": "\"IBM Plex Sans JP\", \"Noto Sans JP\", system-ui, sans-serif",
+      "fontSize": "16px",
+      "w": "1238.0",
+      "h": "438.0",
+      "clipped": false
+    }
+  ],
+  "totalCJKElements": 27
+}

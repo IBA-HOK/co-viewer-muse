@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Nothing-inspired: black + 1px industrial border + 3x3 dot glyph + red accent -->
+  <rect width="512" height="512" fill="#050507"/>
+  <rect x="1.5" y="1.5" width="509" height="509" fill="none" stroke="#232326" stroke-width="3"/>
+  <!-- corner registration -->
+  <rect x="472" y="8" width="32" height="32" fill="#FF1A1A"/>
+  <rect x="16" y="494" width="96" height="4" fill="#232326"/>
+  <!-- dot grid centered 192x192 -->
+  <g transform="translate(160,160)">
+    <rect x="0" y="0" width="56" height="56" rx="1" fill="#F1F1F3"/>
+    <rect x="68" y="0" width="56" height="56" rx="1" fill="#F1F1F3"/>
+    <rect x="136" y="0" width="56" height="56" rx="1" fill="#F1F1F3" opacity="0.30"/>
+    <rect x="0" y="68" width="56" height="56" rx="1" fill="#F1F1F3"/>
+    <rect x="68" y="68" width="56" height="56" rx="1" fill="#FF1A1A"/>
+    <rect x="136" y="68" width="56" height="56" rx="1" fill="#F1F1F3" opacity="0.50"/>
+    <rect x="0" y="136" width="56" height="56" rx="1" fill="#F1F1F3" opacity="0.30"/>
+    <rect x="68" y="136" width="56" height="56" rx="1" fill="#F1F1F3" opacity="0.50"/>
+    <rect x="136" y="136" width="56" height="56" rx="1" fill="#F1F1F3"/>
+  </g>
+</svg>

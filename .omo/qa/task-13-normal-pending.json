@@ -1,0 +1,9 @@
+{
+  "animationDuration": "0.32s",
+  "animationName": "nothing-glyph-sweep",
+  "borderColor": "rgb(255, 255, 255)",
+  "boxShadow": "rgba(255, 26, 26, 0.28) 0px 0px 10px 0px",
+  "enqueueDurationVar": ".32s",
+  "enqueueEaseVar": "cubic-bezier(.2, 0, 0, 1)",
+  "nothingRedVar": "#ff1a1a"
+}

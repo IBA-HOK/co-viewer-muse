@@ -1,0 +1,1232 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { MutableRefObject } from 'react';
+import {
+  SYNC_DRIFT_THRESHOLD,
+  SYNC_PING_INTERVAL,
+  type ChatMessage,
+  type LocalPlayerEvent,
+  type Participant,
+  type Platform,
+  type PlayerController,
+  type QueueItem,
+  type Role,
+  type SyncMessage,
+} from '../types';
+import { fetchTitle } from '../titleFetcher';
+import {
+  DriftGuard,
+  effectiveDriftThreshold,
+  predictRemoteTime,
+  type RemoteClock,
+} from '../sync/driftGuard';
+
+export interface UseRoomSyncOptions {
+  isHost: boolean;
+  myId: string | null;
+  connected: boolean;
+  myName: string;
+  broadcast: (msg: SyncMessage) => void;
+  sendTo: (peerId: string, msg: SyncMessage) => void;
+}
+
+export interface UseRoomSyncResult {
+  controllerRef: MutableRefObject<PlayerController | null>;
+  isRemoteSyncingRef: MutableRefObject<boolean>;
+  participants: Participant[];
+  myRole: Role;
+  canControl: boolean;
+  canQueue: boolean;
+  driveMode: boolean;
+  driveAudioOnly: boolean;
+  currentMedia: { platform: Platform; videoId: string } | null;
+  queue: QueueItem[];
+  currentId: string | null;
+  isPlaying: boolean;
+  currentTime: number;
+  /**
+   * 0 = automatic drift correction is running normally. 1..n = fallback hold
+   * is active (automatic corrections paused to keep the video playing on a
+   * device that cannot seek quickly); a manual `resyncNow()` clears it.
+   */
+  syncFallbackLevel: number;
+  /** True while a manual resync is waiting for a playable ping to confirm/redo. */
+  syncResyncing: boolean;
+  /**
+   * >0 when playback is continuing with a tolerated (adaptive) lag of this many
+   * seconds, e.g. 8.0 on a device that needs 8s to recover from a seek. 0 when
+   * sync is within the base tolerance. Lets the UI surface the trade-off and
+   * offer a manual resync.
+   */
+  syncToleranceLag: number;
+  /** Manually align to the host's latest known position and leave fallback. */
+  resyncNow: () => void;
+  handleIncoming: (msg: SyncMessage, fromPeerId: string) => void;
+  reportLocalEvent: (e: LocalPlayerEvent) => void;
+  localSeek: (seconds: number) => void;
+  localLoadMedia: (platform: Platform, videoId: string) => void;
+  titles: Record<string, string>;
+  goToItem: (id: string) => void;
+  goNext: () => void;
+  goPrevious: () => void;
+  removeFromQueue: (id: string) => void;
+  moveInQueue: (fromIndex: number, toIndex: number) => void;
+  delegateController: (peerId: string, role: Role) => void;
+  setMyNickname: (name: string) => void;
+  onGuestJoined: (peerId: string, name: string) => void;
+  onGuestLeft: (peerId: string) => void;
+  onHostLost: () => void;
+  onGuestReady: () => void;
+  vcActive: boolean;
+  vcPeers: Set<string>;
+  setVcActive: (active: boolean) => void;
+  broadcastVcPeer: (inVc: boolean) => void;
+  setDriveMode: (enabled: boolean) => void;
+  setDriveAudioOnly: (audioOnly: boolean) => void;
+  chat: ChatMessage[];
+  sendChat: (text: string) => void;
+}
+
+/**
+ * Aggregates all room sync state and enforces loop prevention. A single
+ * `isRemoteSyncingRef` flag is raised while a remote command is applied so the
+ * platform hook's change listener cannot re-broadcast the same command.
+ */
+function dedupeParticipants(list: Participant[]): Participant[] {
+  const seen = new Set<string>();
+  const out: Participant[] = [];
+  for (const p of list) {
+    if (seen.has(p.peerId)) continue;
+    seen.add(p.peerId);
+    out.push(p);
+  }
+  return out;
+}
+
+export function normalizeName(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
+  const { isHost, myId, connected, myName, broadcast, sendTo } = opts;
+
+  const controllerRef = useRef<PlayerController | null>(null);
+  const isRemoteSyncingRef = useRef(false);
+  const myNameRef = useRef(myName);
+  myNameRef.current = myName;
+
+  // Low-performance guest fallback (see src/sync/driftGuard.ts).
+  const driftGuardRef = useRef<DriftGuard | null>(null);
+  if (!driftGuardRef.current) driftGuardRef.current = new DriftGuard();
+  /** Last authoritative host timestamp, used to predict the host position. */
+  const remoteClockRef = useRef<RemoteClock | null>(null);
+  /**
+   * Previous host ping (time + host send timestamp). A discontinuity between
+   * pings means the host deliberately moved the playback position (or stalled),
+   * which must be followed even while the low-performance fallback is holding
+   * automatic corrections.
+   */
+  const lastHostPingRef = useRef<{
+    time: number;
+    isPlaying: boolean;
+    sentAt: number | null;
+    receivedAt: number;
+  } | null>(null);
+  /** A detected host seek that could not be followed yet (e.g. still buffering). */
+  const pendingHostSeekRef = useRef(false);
+  /**
+   * After a manual resync, check the next playable ping against the base
+   * tolerance once: the seek itself may have buffered for a while, leaving the
+   * guest behind again. If that one correction fails, the normal fallback
+   * takes over instead of silently accepting the residual lag.
+   */
+  const resyncBoostRef = useRef(false);
+  const [syncFallbackLevel, setSyncFallbackLevel] = useState(0);
+  const [syncResyncing, setSyncResyncing] = useState(false);
+  const [syncToleranceLag, setSyncToleranceLag] = useState(0);
+  const syncFallbackTimerRef = useRef<number | null>(null);
+  const resyncTimerRef = useRef<number | null>(null);
+
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [titles, setTitles] = useState<Record<string, string>>({});
+  const [vcActive, setVcActiveState] = useState(false);
+  const [vcPeers, setVcPeers] = useState<Set<string>>(new Set());
+  const [driveMode, setDriveModeState] = useState(false);
+  const [driveAudioOnly, setDriveAudioOnlyState] = useState(false);
+  const [chat, setChat] = useState<ChatMessage[]>([]);
+
+  const titleFailedRef = useRef<Set<string>>(new Set());
+  const titleRetryRef = useRef<Map<string, number>>(new Map());
+  const controllerMemoryRef = useRef<Set<string>>(new Set());
+
+  const participantsRef = useRef<Participant[]>([]);
+  const queueRef = useRef<QueueItem[]>([]);
+  const currentIdRef = useRef<string | null>(null);
+  const currentMediaRef = useRef<{ platform: Platform; videoId: string } | null>(
+    null
+  );
+  const isPlayingRef = useRef(false);
+  const currentTimeRef = useRef(0);
+  const endAdvanceRef = useRef<string | null>(null);
+  const goNextRef = useRef<() => void>(() => {});
+  const driveModeRef = useRef(false);
+  const driveAudioOnlyRef = useRef(false);
+  const chatRef = useRef<ChatMessage[]>([]);
+
+  // The currently-playing video is derived from the queue + pointer.
+  const currentMedia = useMemo<{ platform: Platform; videoId: string } | null>(
+    () => {
+      if (!currentId) return null;
+      const it = queue.find((q) => q.id === currentId);
+      return it ? { platform: it.platform, videoId: it.videoId } : null;
+    },
+    [queue, currentId]
+  );
+
+  // Keep refs in sync for use inside stable callbacks.
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
+  useEffect(() => {
+    currentIdRef.current = currentId;
+    endAdvanceRef.current = null;
+  }, [currentId]);
+  useEffect(() => {
+    currentMediaRef.current = currentMedia;
+  }, [currentMedia]);
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+  useEffect(() => {
+    driveModeRef.current = driveMode;
+  }, [driveMode]);
+  useEffect(() => {
+    driveAudioOnlyRef.current = driveAudioOnly;
+  }, [driveAudioOnly]);
+  useEffect(() => {
+    chatRef.current = chat;
+  }, [chat]);
+
+  // Seed self into the participant list once our id is known.
+  useEffect(() => {
+    if (!myId) return;
+    setParticipants((prev) => {
+      const deduped = dedupeParticipants(prev);
+      if (deduped.some((p) => p.peerId === myId)) {
+        return deduped.map((p) =>
+          p.peerId === myId
+            ? { ...p, name: isHost ? `${myName} (Host)` : myName, isHost, role: isHost ? ('Host' as Role) : p.role }
+            : p
+        );
+      }
+      const self: Participant = { peerId: myId, name: isHost ? `${myName} (Host)` : myName, isHost, role: isHost ? 'Host' : 'Viewer' };
+      return dedupeParticipants([self, ...deduped.filter((p) => p.peerId !== myId)]);
+    });
+  }, [myId, isHost, myName]);
+
+  useEffect(() => {
+    const missing = queue.filter(
+      (q) => !titles[q.id] && !titleFailedRef.current.has(q.id)
+    );
+    if (missing.length === 0) return;
+    let cancelled = false;
+    missing.forEach(async (item) => {
+      const retry = titleRetryRef.current.get(item.id) ?? 0;
+      if (retry >= 3) {
+        titleFailedRef.current.add(item.id);
+        return;
+      }
+      const t = await fetchTitle(item.platform, item.videoId);
+      if (cancelled) return;
+      if (t) {
+        setTitles((prev) => ({ ...prev, [item.id]: t }));
+        titleRetryRef.current.delete(item.id);
+      } else {
+        const next = retry + 1;
+        titleRetryRef.current.set(item.id, next);
+        if (next >= 3) titleFailedRef.current.add(item.id);
+        else {
+          window.setTimeout(() => {
+            if (cancelled) return;
+            titleRetryRef.current.delete(item.id);
+            setTitles((prev) => ({ ...prev }));
+          }, 3000 * next);
+        }
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [queue, titles]);
+
+  /** Apply a remote command while suppressing the local change listener. */
+  const applyRemote = useCallback((fn: () => void) => {
+    isRemoteSyncingRef.current = true;
+    try {
+      fn();
+    } finally {
+      window.setTimeout(() => {
+        isRemoteSyncingRef.current = false;
+      }, 400);
+    }
+  }, []);
+
+  /**
+   * Feed a host ping into the discontinuity detector. Returns true when the
+   * host's reported position jumped *forward* beyond the expected continuation
+   * of the previous ping — a deliberate seek that must be followed even while
+   * the fallback is holding automatic corrections. A host stall/rebuffer makes
+   * the position fall behind its continuation and is deliberately ignored.
+   */
+  const recordHostPing = useCallback(
+    (
+      msg: { currentTime: number; isPlaying: boolean; sentAt?: number },
+      receivedAt: number
+    ): boolean => {
+      const prev = lastHostPingRef.current;
+      const hasSentAt = typeof msg.sentAt === 'number' && Number.isFinite(msg.sentAt);
+      lastHostPingRef.current = {
+        time: msg.currentTime,
+        isPlaying: msg.isPlaying,
+        sentAt: hasSentAt ? (msg.sentAt as number) : null,
+        receivedAt,
+      };
+      if (!prev) return false;
+      if (prev.isPlaying !== msg.isPlaying) return false;
+      const precise = hasSentAt && prev.sentAt != null;
+      const elapsedSec = prev.isPlaying
+        ? Math.max(
+            0,
+            precise
+              ? ((msg.sentAt as number) - (prev.sentAt as number)) / 1000
+              : (receivedAt - prev.receivedAt) / 1000
+          )
+        : 0;
+      const delta = msg.currentTime - (prev.time + elapsedSec);
+      // Only a *forward* discontinuity is a reliable seek signal. A host
+      // rebuffer/stall also makes the playhead fall behind its expected
+      // continuation, but that must not break the guest's fallback and pull it
+      // out of the hold (a backward host seek is still handled by the normal
+      // drift correction when no hold is active).
+      // With send timestamps the continuation is exact; without them, network
+      // jitter has to be absorbed by a much looser bound.
+      const tolerance = precise ? 1.2 : 3;
+      return delta > tolerance;
+    },
+    []
+  );
+
+  const clearResyncPending = useCallback(() => {
+    setSyncResyncing(false);
+    if (resyncTimerRef.current != null) {
+      window.clearTimeout(resyncTimerRef.current);
+      resyncTimerRef.current = null;
+    }
+  }, []);
+
+  const markResyncPending = useCallback(() => {
+    setSyncResyncing(true);
+    if (resyncTimerRef.current != null) window.clearTimeout(resyncTimerRef.current);
+    // Do not leave a "resyncing" notice up forever if no usable ping arrives.
+    resyncTimerRef.current = window.setTimeout(() => {
+      resyncTimerRef.current = null;
+      resyncBoostRef.current = false;
+      setSyncResyncing(false);
+    }, 20000);
+  }, []);
+
+  /**
+   * Mirror the drift guard's hold state into React state (badge in the UI) and
+   * re-arm a timer so the badge disappears even if no further ping arrives.
+   */
+  const publishFallbackLevel = useCallback((at: number) => {
+    const guard = driftGuardRef.current!;
+    const active = guard.isHoldActive(at);
+    setSyncFallbackLevel(active ? guard.activeHoldLevel : 0);
+    if (syncFallbackTimerRef.current != null) {
+      window.clearTimeout(syncFallbackTimerRef.current);
+      syncFallbackTimerRef.current = null;
+    }
+    if (active) {
+      syncFallbackTimerRef.current = window.setTimeout(() => {
+        syncFallbackTimerRef.current = null;
+        if (!driftGuardRef.current!.isHoldActive(Date.now())) {
+          setSyncFallbackLevel(0);
+        }
+      }, Math.max(0, guard.holdEndsAt - at) + 50);
+    }
+  }, []);
+
+  /** New media / new room state: forget the previous fallback history. */
+  const resetDriftGuard = useCallback(
+    (markSeek: boolean) => {
+      const at = Date.now();
+      const guard = driftGuardRef.current!;
+      guard.reset();
+      if (markSeek) guard.noteSeek(at);
+      lastHostPingRef.current = null;
+      pendingHostSeekRef.current = false;
+      resyncBoostRef.current = false;
+      clearResyncPending();
+      setSyncToleranceLag(0);
+      publishFallbackLevel(at);
+    },
+    [clearResyncPending, publishFallbackLevel]
+  );
+
+  useEffect(
+    () => () => {
+      if (resyncTimerRef.current != null) {
+        window.clearTimeout(resyncTimerRef.current);
+        resyncTimerRef.current = null;
+      }
+    },
+    []
+  );
+
+  useEffect(
+    () => () => {
+      if (syncFallbackTimerRef.current != null) {
+        window.clearTimeout(syncFallbackTimerRef.current);
+        syncFallbackTimerRef.current = null;
+      }
+    },
+    []
+  );
+
+  const canControlNow = useCallback(() => {
+    if (isHost) return true;
+    if (driveModeRef.current) return true;
+    return (
+      participantsRef.current.find((p) => p.peerId === myId)?.role ===
+      'Controller'
+    );
+  }, [isHost, myId]);
+
+  const canControlPlaybackNow = useCallback(() => {
+    if (isHost) return true;
+    if (driveModeRef.current) return true;
+    return (
+      participantsRef.current.find((p) => p.peerId === myId)?.role ===
+      'Controller'
+    );
+  }, [isHost, myId]);
+
+  /** Host time-authority ping: broadcasts current playback state to align peers. */
+  const emitSyncPing = useCallback(() => {
+    broadcast({
+      type: 'SYNC_PING',
+      currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+      isPlaying: controllerRef.current?.getIsPlaying() ?? false,
+      sentAt: Date.now(),
+      senderId: myId ?? '',
+    });
+  }, [broadcast, myId]);
+
+  const handleIncoming = useCallback(
+    (msg: SyncMessage, fromPeerId: string) => {
+      const senderId = myId ?? '';
+      switch (msg.type) {
+        case 'PLAY': {
+          setIsPlaying(true);
+          if (!isHost && msg.senderId !== myId) {
+            remoteClockRef.current = {
+              time: msg.currentTime,
+              isPlaying: true,
+              at: Date.now(),
+            };
+          }
+          // Re-baseline the discontinuity detector, but keep any already
+          // detected host seek: it must still be followed after the resume.
+          lastHostPingRef.current = null;
+          applyRemote(() => controllerRef.current?.play());
+          break;
+        }
+        case 'PAUSE': {
+          setIsPlaying(false);
+          if (!isHost && msg.senderId !== myId) {
+            remoteClockRef.current = {
+              time: msg.currentTime,
+              isPlaying: false,
+              at: Date.now(),
+            };
+          }
+          // Nothing to chase while paused; release the current hold so the
+          // badge does not linger, but keep the escalation history so a device
+          // that keeps failing still backs off after the pause.
+          const pauseAt = Date.now();
+          driftGuardRef.current!.releaseHold();
+          lastHostPingRef.current = null;
+          resyncBoostRef.current = false;
+          clearResyncPending();
+          setSyncToleranceLag(0);
+          publishFallbackLevel(pauseAt);
+          applyRemote(() => controllerRef.current?.pause());
+          break;
+        }
+        case 'SEEK': {
+          if (driveModeRef.current && !isHost) break;
+          const seekAt = Date.now();
+          if (!isHost && msg.senderId !== myId) {
+            remoteClockRef.current = {
+              time: msg.currentTime,
+              isPlaying: remoteClockRef.current?.isPlaying ?? true,
+              at: seekAt,
+            };
+          }
+          // An explicit seek is a fresh position: leave fallback and give the
+          // player a settle window before any automatic correction is allowed.
+          driftGuardRef.current!.clearHold();
+          driftGuardRef.current!.noteSeek(seekAt);
+          lastHostPingRef.current = null;
+          pendingHostSeekRef.current = false;
+          resyncBoostRef.current = false;
+          clearResyncPending();
+          setSyncToleranceLag(0);
+          publishFallbackLevel(seekAt);
+          setCurrentTime(msg.currentTime);
+          applyRemote(() => controllerRef.current?.seekTo(msg.currentTime));
+          break;
+        }
+        case 'SYNC_PING': {
+          if (driveModeRef.current && !isHost) break;
+          const pingAt = Date.now();
+          if (!isHost && msg.senderId !== myId) {
+            // A host position jump (user seek) must be followed even while the
+            // low-performance fallback is holding automatic corrections. Do not
+            // confuse it with the lag this device accumulates while buffering.
+            if (recordHostPing(msg, pingAt)) pendingHostSeekRef.current = true;
+            remoteClockRef.current = {
+              time: msg.currentTime,
+              isPlaying: msg.isPlaying,
+              at: pingAt,
+            };
+          }
+          if (!currentMediaRef.current) break;
+          const controller = controllerRef.current;
+          if (!controller) break;
+          const local = controller.getCurrentTime();
+          const drift = Math.abs(local - msg.currentTime);
+          const hostSeekPending = pendingHostSeekRef.current;
+          const resyncBoost = resyncBoostRef.current;
+          if (hostSeekPending) {
+            // The host deliberately moved: the fallback's "do not chase" rule
+            // no longer applies, and the normal (not adaptive) tolerance is
+            // used so the change is actually followed.
+            driftGuardRef.current!.clearHold();
+          }
+          // A device that needs e.g. 6s to recover from a seek can never hold
+          // the default 1.5s bound; tolerate the lag its own buffering causes
+          // (capped by DRIFT_ADAPTIVE_MAX_SEC) instead of re-seeking forever.
+          // A host seek or an explicit user resync is checked against the base
+          // tolerance instead, so it is not silently absorbed.
+          const threshold =
+            hostSeekPending || resyncBoost || !msg.isPlaying
+              ? SYNC_DRIFT_THRESHOLD
+              : effectiveDriftThreshold(controller.getSeekRecoveryMs?.() ?? 0);
+          const buffering = controller.isBuffering?.() ?? false;
+          const decision = driftGuardRef.current!.evaluate({
+            drift,
+            isBuffering: buffering,
+            threshold,
+            at: pingAt,
+          });
+          if (decision.action === 'correct') {
+            // A correction is starting; the tolerated-lag notice is transient.
+            setSyncToleranceLag(0);
+            setCurrentTime(msg.currentTime);
+            applyRemote(() => {
+              controller.seekTo(msg.currentTime);
+              if (msg.isPlaying) controller.play();
+              else controller.pause();
+            });
+            if (hostSeekPending) {
+              // Following a host seek is not a failed automatic correction:
+              // start a settle window, do not add a fallback strike.
+              driftGuardRef.current!.noteSeek(pingAt);
+              pendingHostSeekRef.current = false;
+            } else {
+              driftGuardRef.current!.noteCorrection(pingAt);
+            }
+            if (resyncBoost) {
+              resyncBoostRef.current = false;
+              clearResyncPending();
+            }
+            publishFallbackLevel(pingAt);
+          } else {
+            if (hostSeekPending && decision.reason === 'within-threshold') {
+              pendingHostSeekRef.current = false;
+            }
+            if (resyncBoost && decision.reason === 'within-threshold') {
+              resyncBoostRef.current = false;
+              clearResyncPending();
+            }
+            if (decision.reason === 'within-threshold' && !buffering) {
+              // Distinguish "aligned" from "playing at a tolerated lag": the
+              // latter must be visible (and resyncable) instead of silently
+              // accepted.
+              const lag = drift > SYNC_DRIFT_THRESHOLD + 0.5 ? Math.round(drift * 10) / 10 : 0;
+              setSyncToleranceLag(lag);
+            } else if (decision.reason === 'fallback-hold') {
+              setSyncToleranceLag(0);
+            }
+            setIsPlaying(msg.isPlaying);
+            publishFallbackLevel(pingAt);
+          }
+          break;
+        }
+        case 'PARTICIPANTS': {
+          setParticipants(dedupeParticipants(msg.participants));
+          break;
+        }
+        case 'REQUEST_STATE': {
+          if (!isHost) break;
+          if (currentMediaRef.current) {
+            sendTo(msg.senderId, {
+              type: 'STATE_SNAPSHOT',
+              platform: currentMediaRef.current.platform,
+              videoId: currentMediaRef.current.videoId,
+              currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+              isPlaying: controllerRef.current?.getIsPlaying() ?? false,
+              queue: queueRef.current,
+              currentId: currentIdRef.current,
+              senderId,
+            });
+          }
+          break;
+        }
+        case 'QUEUE_UPDATE': {
+          setQueue(msg.queue);
+          const changed = msg.currentId !== currentIdRef.current;
+          setCurrentId(msg.currentId);
+          if (changed && !(driveModeRef.current && !isHost)) {
+            const it = msg.queue.find((q) => q.id === msg.currentId);
+            if (it) {
+              if (!isHost) {
+                remoteClockRef.current = {
+                  time: msg.currentTime,
+                  isPlaying: remoteClockRef.current?.isPlaying ?? true,
+                  at: Date.now(),
+                };
+              }
+              // New media: forget the old item's fallback history and keep
+              // automatic corrections away while it loads.
+              resetDriftGuard(true);
+              applyRemote(() => {
+                controllerRef.current?.loadMedia(it.videoId);
+                controllerRef.current?.seekTo(msg.currentTime);
+                controllerRef.current?.play();
+              });
+            }
+          }
+          break;
+        }
+        case 'STATE_SNAPSHOT': {
+          setQueue(msg.queue);
+          setCurrentId(msg.currentId);
+          setCurrentTime(msg.currentTime);
+          setIsPlaying(msg.isPlaying);
+          if (driveModeRef.current && !isHost) break;
+          if (!isHost) {
+            remoteClockRef.current = {
+              time: msg.currentTime,
+              isPlaying: msg.isPlaying,
+              at: Date.now(),
+            };
+          }
+          resetDriftGuard(true);
+          applyRemote(() => {
+            controllerRef.current?.loadMedia(msg.videoId);
+            controllerRef.current?.seekTo(msg.currentTime);
+            if (msg.isPlaying) controllerRef.current?.play();
+          });
+          break;
+        }
+        case 'DRIVE_MODE': {
+          setDriveModeState(msg.enabled);
+          setDriveAudioOnlyState(msg.audioOnly);
+          // The video player is hidden/torn down for drive-mode guests, so a
+          // pending fallback state must not survive the mode switch.
+          if (!isHost) resetDriftGuard(false);
+          break;
+        }
+        case 'ROLE_UPDATE':
+          break;
+        case 'NAME_UPDATE': {
+          if (!isHost) break;
+          const updated = dedupeParticipants(
+            participantsRef.current.map((p) =>
+              p.peerId === msg.peerId ? { ...p, name: msg.name } : p
+            )
+          );
+          setParticipants(updated);
+          broadcast({ type: 'PARTICIPANTS', participants: updated, senderId });
+          break;
+        }
+        case 'VC_STATE': {
+          setVcActiveState(msg.active);
+          break;
+        }
+        case 'VC_PEER': {
+          setVcPeers((prev) => {
+            const next = new Set(prev);
+            if (msg.inVc) next.add(msg.peerId);
+            else next.delete(msg.peerId);
+            return next;
+          });
+          break;
+        }
+        case 'CHAT_MESSAGE': {
+          // senderId === peerId on this variant: skip echoes of own messages.
+          if (msg.senderId === myId) break;
+          const id = `${msg.peerId}-${msg.timestamp}`;
+          setChat((prev) => {
+            if (prev.some((m) => m.id === id)) return prev;
+            const next = [
+              ...prev,
+              { id, peerId: msg.peerId, name: msg.name, text: msg.text, timestamp: msg.timestamp },
+            ];
+            return next.length > 200 ? next.slice(next.length - 200) : next;
+          });
+          break;
+        }
+      }
+
+      // Star topology: host rebroadcasts a guest's playback command to other guests.
+      if (
+        isHost &&
+        fromPeerId !== myId &&
+        (msg.type === 'QUEUE_UPDATE' ||
+          msg.type === 'PLAY' ||
+          msg.type === 'PAUSE' ||
+          msg.type === 'SEEK')
+      ) {
+        broadcast(msg);
+      }
+      if (isHost && fromPeerId !== myId && (msg.type === 'VC_PEER' || msg.type === 'VC_STATE')) {
+        broadcast(msg);
+      }
+      if (isHost && fromPeerId !== myId && msg.type === 'CHAT_MESSAGE') {
+        broadcast(msg);
+      }
+    },
+    [applyRemote, broadcast, clearResyncPending, isHost, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendTo]
+  );
+
+  const reportLocalEvent = useCallback(
+    (e: LocalPlayerEvent) => {
+      if (driveModeRef.current && !isHost && e.kind !== 'PLAY' && e.kind !== 'PAUSE') return;
+      const senderId = myId ?? '';
+      if (e.kind === 'PLAY') {
+        setIsPlaying(true);
+        broadcast({ type: 'PLAY', currentTime: e.currentTime, senderId });
+      } else if (e.kind === 'PAUSE') {
+        setIsPlaying(false);
+        // A local pause leaves nothing to chase; do not keep the fallback
+        // notice up while the room is paused.
+        const pauseAt = Date.now();
+        driftGuardRef.current!.clearHold();
+        resyncBoostRef.current = false;
+        clearResyncPending();
+        setSyncToleranceLag(0);
+        publishFallbackLevel(pauseAt);
+        broadcast({ type: 'PAUSE', currentTime: e.currentTime, senderId });
+      } else if (e.kind === 'END') {
+        setIsPlaying(false);
+        const cur = currentIdRef.current;
+        if (cur && endAdvanceRef.current !== cur) {
+          endAdvanceRef.current = cur;
+          goNextRef.current();
+        }
+      }
+    },
+    [broadcast, isHost, myId, publishFallbackLevel]
+  );
+
+  const localSeek = useCallback(
+    (seconds: number) => {
+      if (!canControlPlaybackNow()) return;
+      const at = Date.now();
+      // An explicit seek is a fresh position: leave fallback and give the
+      // player a settle window before automatic corrections resume.
+      driftGuardRef.current!.clearHold();
+      driftGuardRef.current!.noteSeek(at);
+      publishFallbackLevel(at);
+      setCurrentTime(seconds);
+      applyRemote(() => controllerRef.current?.seekTo(seconds));
+      broadcast({ type: 'SEEK', currentTime: seconds, senderId: myId ?? '' });
+    },
+    [applyRemote, broadcast, canControlPlaybackNow, myId, publishFallbackLevel]
+  );
+
+  const localLoadMedia = useCallback(
+    (platform: Platform, videoId: string) => {
+      if (!canControlNow()) return;
+      const id = `${platform}:${videoId}`;
+      const exists = queueRef.current.some((q) => q.id === id);
+      const nextQueue = exists
+        ? queueRef.current
+        : [...queueRef.current, { id, platform, videoId, addedBy: myNameRef.current }];
+      const wasEmpty = currentIdRef.current === null;
+      const wasAtTailAndStopped =
+        !wasEmpty &&
+        !exists &&
+        (() => {
+          const cur = currentIdRef.current;
+          if (!cur) return false;
+          const idx = queueRef.current.findIndex((q) => q.id === cur);
+          return idx === queueRef.current.length - 1 && !isPlayingRef.current;
+        })();
+      setQueue(nextQueue);
+      if (wasEmpty || wasAtTailAndStopped) {
+        setCurrentId(id);
+        if (!driveModeRef.current || isHost) {
+          resetDriftGuard(true);
+          applyRemote(() => {
+            controllerRef.current?.loadMedia(videoId);
+            controllerRef.current?.seekTo(0);
+            controllerRef.current?.play();
+          });
+          setIsPlaying(true);
+        }
+        broadcast({
+          type: 'QUEUE_UPDATE',
+          queue: nextQueue,
+          currentId: id,
+          currentTime: 0,
+          senderId: myId ?? '',
+        });
+        if (isHost) emitSyncPing();
+        return;
+      }
+      broadcast({
+        type: 'QUEUE_UPDATE',
+        queue: nextQueue,
+        currentId: currentIdRef.current,
+        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+        senderId: myId ?? '',
+      });
+      if (isHost) emitSyncPing();
+    },
+    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard]
+  );
+
+  const goToItem = useCallback(
+    (id: string) => {
+      if (!canControlNow()) return;
+      const it = queueRef.current.find((q) => q.id === id);
+      if (!it) return;
+      setCurrentId(id);
+      resetDriftGuard(true);
+      if (!driveModeRef.current || isHost) {
+        applyRemote(() => {
+          controllerRef.current?.loadMedia(it.videoId);
+          controllerRef.current?.play();
+        });
+      }
+      broadcast({
+        type: 'QUEUE_UPDATE',
+        queue: queueRef.current,
+        currentId: id,
+        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+        senderId: myId ?? '',
+      });
+      if (isHost) emitSyncPing();
+    },
+    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard]
+  );
+
+  const goNext = useCallback(() => {
+    if (!canControlNow()) return;
+    const cur = currentIdRef.current;
+    if (!cur) return;
+    const idx = queueRef.current.findIndex((q) => q.id === cur);
+    if (idx < 0 || idx >= queueRef.current.length - 1) return;
+    goToItem(queueRef.current[idx + 1].id);
+  }, [canControlNow, goToItem]);
+  goNextRef.current = goNext;
+
+  const goPrevious = useCallback(() => {
+    if (!canControlNow()) return;
+    const cur = currentIdRef.current;
+    if (!cur) return;
+    const idx = queueRef.current.findIndex((q) => q.id === cur);
+    if (idx <= 0) return;
+    goToItem(queueRef.current[idx - 1].id);
+  }, [canControlNow, goToItem]);
+
+  const removeFromQueue = useCallback(
+    (id: string) => {
+      if (!canControlNow()) return;
+      const idx = queueRef.current.findIndex((q) => q.id === id);
+      if (idx < 0) return;
+      const nextQueue = queueRef.current.filter((q) => q.id !== id);
+      let nextCurrentId = currentIdRef.current;
+      if (currentIdRef.current === id) {
+        const replacement = nextQueue[idx - 1] ?? nextQueue[idx] ?? null;
+        nextCurrentId = replacement ? replacement.id : null;
+        resetDriftGuard(!!replacement);
+        if (replacement && (!driveModeRef.current || isHost)) {
+          applyRemote(() => {
+            controllerRef.current?.loadMedia(replacement.videoId);
+            controllerRef.current?.play();
+          });
+        } else if (!replacement && (!driveModeRef.current || isHost)) {
+          applyRemote(() => controllerRef.current?.pause());
+        }
+      }
+      setQueue(nextQueue);
+      setCurrentId(nextCurrentId);
+      broadcast({
+        type: 'QUEUE_UPDATE',
+        queue: nextQueue,
+        currentId: nextCurrentId,
+        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+        senderId: myId ?? '',
+      });
+      if (isHost) emitSyncPing();
+    },
+    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard]
+  );
+
+  const moveInQueue = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      if (!canControlNow()) return;
+      const q = queueRef.current;
+      const n = q.length;
+      if (n < 2) return;
+      const from = Math.max(0, Math.min(n - 1, fromIndex));
+      const to = Math.max(0, Math.min(n - 1, toIndex));
+      if (from === to) return;
+      const next = [...q];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      setQueue(next);
+      broadcast({
+        type: 'QUEUE_UPDATE',
+        queue: next,
+        currentId: currentIdRef.current,
+        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+        senderId: myId ?? '',
+      });
+    },
+    [broadcast, canControlNow, myId]
+  );
+
+  const delegateController = useCallback(
+    (peerId: string, role: Role) => {
+      if (!isHost) return;
+      const target = participantsRef.current.find((p) => p.peerId === peerId);
+      const norm = target ? normalizeName(target.name) : '';
+      if (norm) {
+        if (role === 'Controller') controllerMemoryRef.current.add(norm);
+        else controllerMemoryRef.current.delete(norm);
+      }
+      const updated = dedupeParticipants(
+        participantsRef.current.map((p) =>
+          p.peerId === peerId ? { ...p, role } : p
+        )
+      );
+      setParticipants(updated);
+      broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
+    },
+    [broadcast, isHost, myId]
+  );
+
+  const onGuestJoined = useCallback(
+    (peerId: string, name: string) => {
+      if (!isHost) return;
+      const norm = normalizeName(name);
+      const existingSame = participantsRef.current.find((p) => p.peerId === peerId);
+      if (existingSame && normalizeName(existingSame.name) === norm) {
+        return;
+      }
+      const evictPeerId = participantsRef.current.find(
+        (p) => !p.isHost && normalizeName(p.name) === norm && p.peerId !== peerId
+      )?.peerId;
+      const rememberedRole = controllerMemoryRef.current.has(norm) ? ('Controller' as Role) : ('Viewer' as Role);
+      const role: Role = driveModeRef.current ? 'Controller' : rememberedRole;
+      if (role === 'Controller') controllerMemoryRef.current.add(norm);
+      const filtered = evictPeerId
+        ? participantsRef.current.filter((p) => p.peerId !== peerId && p.peerId !== evictPeerId)
+        : participantsRef.current.filter((p) => p.peerId !== peerId);
+      const updated = dedupeParticipants([
+        ...filtered,
+        { peerId, name, isHost: false, role },
+      ]);
+      setParticipants(updated);
+      broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
+      sendTo(peerId, {
+        type: 'DRIVE_MODE',
+        enabled: driveModeRef.current,
+        audioOnly: driveAudioOnlyRef.current,
+        senderId: myId ?? '',
+      });
+      if (currentMediaRef.current) {
+        sendTo(peerId, {
+          type: 'STATE_SNAPSHOT',
+          platform: currentMediaRef.current.platform,
+          videoId: currentMediaRef.current.videoId,
+          currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+          isPlaying: controllerRef.current?.getIsPlaying() ?? false,
+          queue: queueRef.current,
+          currentId: currentIdRef.current,
+          senderId: myId ?? '',
+        });
+      } else if (queueRef.current.length > 0) {
+        sendTo(peerId, {
+          type: 'QUEUE_UPDATE',
+          queue: queueRef.current,
+          currentId: currentIdRef.current,
+          currentTime: 0,
+          senderId: myId ?? '',
+        });
+      }
+    },
+    [broadcast, isHost, myId, sendTo]
+  );
+
+  const onGuestLeft = useCallback((peerId: string) => {
+    setParticipants((prev) => dedupeParticipants(prev.filter((p) => p.peerId !== peerId)));
+  }, []);
+
+  const onHostLost = useCallback(() => {
+    setVcActiveState(false);
+    setVcPeers(new Set());
+    setParticipants((prev) => dedupeParticipants(prev.filter((p) => p.peerId === myId)));
+    // No host means no time authority and no more SYNC_PING corrections.
+    remoteClockRef.current = null;
+    resetDriftGuard(false);
+  }, [myId, resetDriftGuard]);
+
+  const onGuestReady = useCallback(() => {
+    broadcast({ type: 'REQUEST_STATE', senderId: myId ?? '' });
+  }, [broadcast, myId]);
+
+  const setVcActive = useCallback(
+    (active: boolean) => {
+      setVcActiveState(active);
+      broadcast({ type: 'VC_STATE', active, senderId: myId ?? '' });
+    },
+    [broadcast, myId]
+  );
+
+  const broadcastVcPeer = useCallback(
+    (inVc: boolean) => {
+      const id = myId ?? '';
+      setVcPeers((prev) => {
+        const next = new Set(prev);
+        if (inVc) next.add(id);
+        else next.delete(id);
+        return next;
+      });
+      broadcast({ type: 'VC_PEER', peerId: id, inVc, senderId: id });
+    },
+    [broadcast, myId]
+  );
+
+  const sendChat = useCallback(
+    (text: string) => {
+      const trimmed = text.trim().slice(0, 500);
+      if (!trimmed) return;
+      const timestamp = Date.now();
+      const id = `${myId}-${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+      broadcast({
+        type: 'CHAT_MESSAGE',
+        peerId: myId ?? '',
+        name: myNameRef.current,
+        text: trimmed,
+        timestamp,
+        senderId: myId ?? '',
+      });
+      setChat((prev) => {
+        const next = [
+          ...prev,
+          { id, peerId: myId ?? '', name: myNameRef.current, text: trimmed, timestamp },
+        ];
+        return next.length > 200 ? next.slice(next.length - 200) : next;
+      });
+    },
+    [broadcast, myId]
+  );
+
+  const setMyNickname = useCallback(
+    (name: string) => {
+      const selfName = isHost ? `${name} (Host)` : name;
+      const updated = dedupeParticipants(
+        participantsRef.current.map((p) =>
+          p.peerId === myId ? { ...p, name: selfName } : p
+        )
+      );
+      setParticipants(updated);
+      if (isHost) {
+        broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
+      } else {
+        broadcast({ type: 'NAME_UPDATE', peerId: myId ?? '', name, senderId: myId ?? '' });
+      }
+    },
+    [broadcast, isHost, myId]
+  );
+
+  const setDriveMode = useCallback(
+    (enabled: boolean) => {
+      if (!isHost) return;
+      setDriveModeState(enabled);
+      if (enabled) {
+        const updated = dedupeParticipants(
+          participantsRef.current.map((p) =>
+            p.isHost ? p : { ...p, role: 'Controller' as Role }
+          )
+        );
+        updated.forEach((p) => {
+          if (!p.isHost) controllerMemoryRef.current.add(normalizeName(p.name));
+        });
+        setParticipants(updated);
+        broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
+      }
+      broadcast({
+        type: 'DRIVE_MODE',
+        enabled,
+        audioOnly: driveAudioOnlyRef.current,
+        senderId: myId ?? '',
+      });
+    },
+    [broadcast, isHost, myId]
+  );
+
+  const setDriveAudioOnly = useCallback(
+    (audioOnly: boolean) => {
+      if (!isHost) return;
+      setDriveAudioOnlyState(audioOnly);
+      broadcast({
+        type: 'DRIVE_MODE',
+        enabled: driveModeRef.current,
+        audioOnly,
+        senderId: myId ?? '',
+      });
+    },
+    [broadcast, isHost, myId]
+  );
+
+  /**
+   * Manual fallback escape hatch (shown in the player overlay while a hold is
+   * active): align to the host's latest predicted position once and re-enable
+   * automatic correction. Works while buffering — the player queues the seek
+   * instead of restarting its load.
+   */
+  const resyncNow = useCallback(() => {
+    const at = Date.now();
+    const guard = driftGuardRef.current!;
+    const controller = controllerRef.current;
+    const clock = remoteClockRef.current;
+    guard.clearHold();
+    publishFallbackLevel(at);
+    if (!controller) return;
+    const target = predictRemoteTime(clock, at);
+    if (target == null) {
+      // No authoritative host timestamp yet: ask for a fresh snapshot instead
+      // of guessing a position.
+      broadcast({ type: 'REQUEST_STATE', senderId: myId ?? '' });
+      return;
+    }
+    guard.noteSeek(at);
+    // One follow-up correction is allowed against the base tolerance, because
+    // the resync seek itself can buffer and leave the guest behind again.
+    resyncBoostRef.current = true;
+    markResyncPending();
+    setCurrentTime(target);
+    applyRemote(() => {
+      controller.seekTo(target);
+      if (clock?.isPlaying) controller.play();
+      else controller.pause();
+    });
+  }, [applyRemote, broadcast, markResyncPending, myId, publishFallbackLevel]);
+
+  // Host is the time authority: periodically broadcast SYNC_PING to all guests.
+  // In drive mode guests don't render video, so skip pings to save bandwidth.
+  useEffect(() => {
+    if (!isHost || !connected || driveMode) return;
+    const id = window.setInterval(() => {
+      broadcast({
+        type: 'SYNC_PING',
+        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+        isPlaying: controllerRef.current?.getIsPlaying() ?? false,
+        sentAt: Date.now(),
+        senderId: myId ?? '',
+      });
+    }, SYNC_PING_INTERVAL);
+    return () => window.clearInterval(id);
+  }, [isHost, connected, driveMode, broadcast, myId]);
+
+  // Preload next queue item's thumbnail for drive-mode buffering.
+  useEffect(() => {
+    if (!driveMode || !isHost || !currentId) return;
+    const idx = queue.findIndex((q) => q.id === currentId);
+    const next = queue[idx + 1];
+    if (!next) return;
+    const thumb =
+      next.platform === 'youtube'
+        ? `https://i.ytimg.com/vi/${next.videoId}/hqdefault.jpg`
+        : `https://tn.smilevideo.jp/smile?i=${next.videoId}`;
+    const img = new Image();
+    img.src = thumb;
+  }, [driveMode, isHost, queue, currentId]);
+
+  const myEntry = participants.find((p) => p.peerId === myId);
+  const myRole: Role = myEntry?.role ?? (isHost ? 'Host' : 'Viewer');
+  const canControl = driveMode ? true : isHost || myRole === 'Controller';
+  const canQueue = driveMode ? true : canControl;
+
+  return {
+    controllerRef,
+    isRemoteSyncingRef,
+    participants,
+    myRole,
+    canControl,
+    canQueue,
+    driveMode,
+    driveAudioOnly,
+    currentMedia,
+    queue,
+    currentId,
+    isPlaying,
+    currentTime,
+    syncFallbackLevel,
+    syncResyncing,
+    syncToleranceLag,
+    resyncNow,
+    handleIncoming,
+    reportLocalEvent,
+    localSeek,
+    localLoadMedia,
+    titles,
+    goToItem,
+    goNext,
+    goPrevious,
+    removeFromQueue,
+    moveInQueue,
+    delegateController,
+    setMyNickname,
+    onGuestJoined,
+    onGuestLeft,
+    onHostLost,
+    onGuestReady,
+    vcActive,
+    vcPeers,
+    setVcActive,
+    broadcastVcPeer,
+    setDriveMode,
+    setDriveAudioOnly,
+    chat,
+    sendChat,
+  };
+}

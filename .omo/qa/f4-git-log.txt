@@ -1,0 +1,15 @@
+d8bf765 feat: link Peers/Voice expand/collapse
+e0d0399 fix: keep queue expand via header + auto landscape on fullscreen mobile
+79c0e3b fix: remove Queue +MORE bottom button, keep scroll indicators only
+0e63933 fix: mixer apply on song, search button color, queue scroll indicators
+8947ef5 feat: 5 fixes — queue scroll, browser LOAD, bg pause, role short, volume mixer
+3958dc6 layout: Browser above Peers/Voice
+ecc4524 feat: Player fullscreen (player-only) + fullscreen drawer (Queue+Browser) + Brave audio-only background
+1928874 fix: favicon not updating — add favicon.ico + cache bust
+56844ae layout: Queue above Peers/Voice (smartphone stack order)
+d701ca2 design: Nothing-like favicon — 3x3 dot glyph + red accent
+7968ac9 design: Nothing-like logo — dot-matrix glyph + red accent
+08c70bb layout: move DriveMode to bottom
+25d4192 layout: Queue full width below, Peers/Voice 2-col on mobile
+0636607 fix: queue NEXT overflow on mobile 2-col
+92cfbee feat: smartphone layout — Queue left / Peers+Voice right, Join into header, Player top-fixed
