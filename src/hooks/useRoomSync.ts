@@ -1003,9 +1003,38 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     [broadcast, isHost, myId, sendTo]
   );
 
-  const onGuestLeft = useCallback((peerId: string) => {
-    setParticipants((prev) => dedupeParticipants(prev.filter((p) => p.peerId !== peerId)));
-  }, []);
+  const onGuestLeft = useCallback(
+    (peerId: string) => {
+      // Build the next list from the ref so the state update and the broadcast
+      // carry exactly the same participants (the leaver must disappear from
+      // every remaining guest's list immediately).
+      const updated = dedupeParticipants(
+        participantsRef.current.filter((p) => p.peerId !== peerId)
+      );
+      setParticipants(updated);
+      broadcast({
+        type: 'PARTICIPANTS',
+        participants: updated,
+        senderId: myId ?? '',
+      });
+      // Stop treating the departed guest as still in the voice call.
+      setVcPeers((prev) => {
+        if (!prev.has(peerId)) return prev;
+        const next = new Set(prev);
+        next.delete(peerId);
+        return next;
+      });
+      broadcast({
+        type: 'VC_PEER',
+        peerId,
+        inVc: false,
+        senderId: myId ?? '',
+      });
+      // Intentionally leave controllerMemoryRef untouched: it restores the
+      // guest's role if they reconnect with the same name.
+    },
+    [broadcast, myId]
+  );
 
   const onHostLost = useCallback(() => {
     setVcActiveState(false);
