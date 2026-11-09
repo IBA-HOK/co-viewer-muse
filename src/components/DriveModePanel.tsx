@@ -8,15 +8,18 @@ interface DriveModePanelProps {
   onToggleAudioOnly: (audioOnly: boolean) => void;
 }
 
-export default function DriveModePanel({
+export default function DriveModePanel(props: DriveModePanelProps) {
+  if (!props.isHost && !props.driveMode) return null;
+  return <DriveModePanelContent {...props} />;
+}
+
+function DriveModePanelContent({
   isHost,
   driveMode,
   audioOnly,
   onToggleDrive,
   onToggleAudioOnly,
 }: DriveModePanelProps) {
-  if (!isHost && !driveMode) return null;
-
   const [collapsed, setCollapsed] = useState(() => {
     try {
       const v = localStorage.getItem('co-viewer:drive-collapsed');
