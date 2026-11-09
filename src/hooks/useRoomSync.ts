@@ -160,6 +160,15 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   const titleFailedRef = useRef<Set<string>>(new Set());
   const titleRetryRef = useRef<Map<string, number>>(new Map());
+  /** Queue item ids that currently have a title request in flight. */
+  const titleInFlightRef = useRef<Set<string>>(new Set());
+  /** Per-item request token, so a stale result (removed/re-added item) is ignored. */
+  const titleRequestTokenRef = useRef<Map<string, number>>(new Map());
+  /** Pending retry timers, keyed by queue item id. */
+  const titleRetryTimersRef = useRef<Map<string, number>>(new Map());
+  /** False only after unmount; a ref update must not cancel in-flight results. */
+  const titleMountedRef = useRef(true);
+  const [titleRetryTick, setTitleRetryTick] = useState(0);
   const controllerMemoryRef = useRef<Set<string>>(new Set());
 
   const participantsRef = useRef<Participant[]>([]);
@@ -234,39 +243,100 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   }, [myId, isHost, myName]);
 
   useEffect(() => {
+    titleMountedRef.current = true;
+    return () => {
+      titleMountedRef.current = false;
+      for (const timer of titleRetryTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      titleRetryTimersRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const queueIds = new Set(queue.map((q) => q.id));
+    // Forget bookkeeping for items that are no longer in the queue. Bumping
+    // the request token invalidates any result that is still on its way.
+    for (const id of Array.from(titleInFlightRef.current)) {
+      if (queueIds.has(id)) continue;
+      titleInFlightRef.current.delete(id);
+      titleRequestTokenRef.current.set(
+        id,
+        (titleRequestTokenRef.current.get(id) ?? 0) + 1
+      );
+    }
+    for (const id of Array.from(titleRetryRef.current.keys())) {
+      if (!queueIds.has(id)) titleRetryRef.current.delete(id);
+    }
+    for (const id of Array.from(titleFailedRef.current)) {
+      if (!queueIds.has(id)) titleFailedRef.current.delete(id);
+    }
+    for (const [id, timer] of Array.from(titleRetryTimersRef.current.entries())) {
+      if (queueIds.has(id)) continue;
+      window.clearTimeout(timer);
+      titleRetryTimersRef.current.delete(id);
+    }
+
     const missing = queue.filter(
-      (q) => !titles[q.id] && !titleFailedRef.current.has(q.id)
+      (q) =>
+        !titles[q.id] &&
+        !titleFailedRef.current.has(q.id) &&
+        !titleInFlightRef.current.has(q.id) &&
+        !titleRetryTimersRef.current.has(q.id)
     );
     if (missing.length === 0) return;
-    let cancelled = false;
-    missing.forEach(async (item) => {
+    missing.forEach((item) => {
       const retry = titleRetryRef.current.get(item.id) ?? 0;
       if (retry >= 3) {
         titleFailedRef.current.add(item.id);
         return;
       }
-      const t = await fetchTitle(item.platform, item.videoId);
-      if (cancelled) return;
-      if (t) {
-        setTitles((prev) => ({ ...prev, [item.id]: t }));
-        titleRetryRef.current.delete(item.id);
-      } else {
+      titleInFlightRef.current.add(item.id);
+      const token = (titleRequestTokenRef.current.get(item.id) ?? 0) + 1;
+      titleRequestTokenRef.current.set(item.id, token);
+      void (async () => {
+        let title: string | null = null;
+        try {
+          title = await fetchTitle(item.platform, item.videoId);
+        } catch {
+          title = null;
+        }
+        // Results are only discarded on unmount (or when the item was removed
+        // and a newer request for the same id has taken over).
+        if (!titleMountedRef.current) return;
+        if (titleRequestTokenRef.current.get(item.id) !== token) return;
+        titleInFlightRef.current.delete(item.id);
+        if (title) {
+          titleRetryRef.current.delete(item.id);
+          titleFailedRef.current.delete(item.id);
+          const pending = titleRetryTimersRef.current.get(item.id);
+          if (pending != null) {
+            window.clearTimeout(pending);
+            titleRetryTimersRef.current.delete(item.id);
+          }
+          setTitles((prev) =>
+            prev[item.id] === title ? prev : { ...prev, [item.id]: title }
+          );
+          return;
+        }
         const next = retry + 1;
         titleRetryRef.current.set(item.id, next);
-        if (next >= 3) titleFailedRef.current.add(item.id);
-        else {
-          window.setTimeout(() => {
-            if (cancelled) return;
-            titleRetryRef.current.delete(item.id);
-            setTitles((prev) => ({ ...prev }));
-          }, 3000 * next);
+        if (next >= 3) {
+          titleFailedRef.current.add(item.id);
+          return;
         }
-      }
+        const pending = titleRetryTimersRef.current.get(item.id);
+        if (pending != null) window.clearTimeout(pending);
+        const timer = window.setTimeout(() => {
+          titleRetryTimersRef.current.delete(item.id);
+          if (!titleMountedRef.current) return;
+          // Re-run the effect without resetting the retry count.
+          setTitleRetryTick((n) => n + 1);
+        }, 3000 * next);
+        titleRetryTimersRef.current.set(item.id, timer);
+      })();
     });
-    return () => {
-      cancelled = true;
-    };
-  }, [queue, titles]);
+  }, [queue, titles, titleRetryTick]);
 
   /** Apply a remote command while suppressing the local change listener. */
   const applyRemote = useCallback((fn: () => void) => {
