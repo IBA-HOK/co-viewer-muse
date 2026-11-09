@@ -123,6 +123,29 @@ const NICO_STATUS = {
   ENDED: 4,
 } as const;
 
+/**
+ * Maps a Niconico `playerStatus` to the room event it should broadcast.
+ *
+ * BUFFERING (1) is a transient network state, not a user intent, so it must
+ * never become a PAUSE. Unknown statuses are likewise ignored. Callers still
+ * update `bufferingRef` separately from this mapping.
+ */
+export function nicoStatusToLocalEvent(
+  status: number,
+  currentTime: number,
+): LocalPlayerEvent | null {
+  switch (status) {
+    case NICO_STATUS.PLAYING:
+      return { kind: 'PLAY', currentTime };
+    case NICO_STATUS.PAUSED:
+      return { kind: 'PAUSE', currentTime };
+    case NICO_STATUS.ENDED:
+      return { kind: 'END' };
+    default:
+      return null;
+  }
+}
+
 function postCommand(
   iframe: HTMLIFrameElement | null,
   playerId: string,
@@ -211,20 +234,16 @@ export function useNiconicoPlayer(
           break;
         case 'playerStatusChange': {
           const status = Number(data.data?.playerStatus);
-          const playing = status === NICO_STATUS.PLAYING;
-          isPlayingRef.current = playing;
+          isPlayingRef.current = status === NICO_STATUS.PLAYING;
           // Drift corrections are meaningless while the embed is loading; the
           // sync layer reads this to hold off seeks during a rebuffer.
           bufferingRef.current = status === NICO_STATUS.BUFFERING;
           if (optsRef.current.isRemoteSyncingRef.current) break;
-          if (status === NICO_STATUS.ENDED) {
-            optsRef.current.onLocalEvent({ kind: 'END' });
-            break;
-          }
-          optsRef.current.onLocalEvent({
-            kind: playing ? 'PLAY' : 'PAUSE',
-            currentTime: currentTimeRef.current,
-          });
+          const localEvent = nicoStatusToLocalEvent(
+            status,
+            currentTimeRef.current,
+          );
+          if (localEvent) optsRef.current.onLocalEvent(localEvent);
           break;
         }
         case 'playerMetadataChange': {
