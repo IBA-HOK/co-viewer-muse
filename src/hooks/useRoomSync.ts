@@ -724,6 +724,14 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   const reportLocalEvent = useCallback(
     (e: LocalPlayerEvent) => {
+      // Viewers must not broadcast playback changes. `END` still runs below so
+      // the local UI stays consistent; `goNext` keeps its own permission guard.
+      if (
+        (e.kind === 'PLAY' || e.kind === 'PAUSE' || e.kind === 'SEEK') &&
+        !canControlPlaybackNow()
+      ) {
+        return;
+      }
       if (driveModeRef.current && !isHost && e.kind !== 'PLAY' && e.kind !== 'PAUSE') return;
       const senderId = myId ?? '';
       if (e.kind === 'PLAY') {
@@ -749,7 +757,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         }
       }
     },
-    [broadcast, isHost, myId, publishFallbackLevel]
+    [broadcast, canControlPlaybackNow, isHost, myId, publishFallbackLevel]
   );
 
   const localSeek = useCallback(

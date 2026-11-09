@@ -224,9 +224,8 @@ export function Player(props: PlayerProps) {
   }
 
   // ambient Glyph frame for VIEWER lock — video remains fully visible.
-  // No pointer-events overlay: PLAY/SEEK blocking is enforced by
-  // canControl / canControlPlaybackNow guards in useRoomSync (localSeek,
-  // localLoadMedia, reportLocalEvent, handleIncoming).
+  // A transparent shield blocks iframe clicks, while reportLocalEvent also
+  // rejects PLAY/PAUSE/SEEK from viewers (defence in depth).
   const isViewerLocked = !!props.platform && !props.canControl && !props.driveMode;
 
   return (
@@ -244,6 +243,13 @@ export function Player(props: PlayerProps) {
           </div>
           <p className="nothing-mono text-xs tracking-widest text-[var(--nothing-text-dim)]">READY · NO MEDIA</p>
         </div>
+      )}
+      {isViewerLocked && (
+        <div
+          className="absolute inset-0 z-10"
+          aria-hidden
+          data-testid="viewer-input-shield"
+        />
       )}
       {(!!props.syncFallbackLevel ||
         !!props.syncResyncing ||
