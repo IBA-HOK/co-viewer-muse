@@ -170,6 +170,12 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const titleMountedRef = useRef(true);
   const [titleRetryTick, setTitleRetryTick] = useState(0);
   const controllerMemoryRef = useRef<Set<string>>(new Set());
+  /**
+   * Roles of non-host participants before drive mode promoted them to
+   * Controller. Restored when drive mode ends; peers that joined during drive
+   * mode have no entry and fall back to Viewer.
+   */
+  const driveModeRoleBackupRef = useRef<Map<string, Role>>(new Map());
 
   const participantsRef = useRef<Participant[]>([]);
   const queueRef = useRef<QueueItem[]>([]);
@@ -1007,6 +1013,14 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const delegateController = useCallback(
     (peerId: string, role: Role) => {
       if (!isHost) return;
+      // Keep the drive-mode snapshot in step with manual role changes so OFF
+      // restores the host's latest choice instead of the pre-drive role.
+      if (
+        driveModeRef.current ||
+        driveModeRoleBackupRef.current.has(peerId)
+      ) {
+        driveModeRoleBackupRef.current.set(peerId, role);
+      }
       const target = participantsRef.current.find((p) => p.peerId === peerId);
       const norm = target ? normalizeName(target.name) : '';
       if (norm) {
@@ -1086,6 +1100,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         participantsRef.current.filter((p) => p.peerId !== peerId)
       );
       setParticipants(updated);
+      driveModeRoleBackupRef.current.delete(peerId);
       broadcast({
         type: 'PARTICIPANTS',
         participants: updated,
@@ -1193,6 +1208,15 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (!isHost) return;
       setDriveModeState(enabled);
       if (enabled) {
+        // Remember the standard-mode roles on the OFF -> ON transition.
+        // Re-enabling while already driving must not snapshot the promoted
+        // Controller roles (or a peer who joined during drive mode).
+        if (!driveModeRef.current) {
+          participantsRef.current.forEach((p) => {
+            if (p.isHost) return;
+            driveModeRoleBackupRef.current.set(p.peerId, p.role);
+          });
+        }
         const updated = dedupeParticipants(
           participantsRef.current.map((p) =>
             p.isHost ? p : { ...p, role: 'Controller' as Role }
@@ -1201,6 +1225,25 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         updated.forEach((p) => {
           if (!p.isHost) controllerMemoryRef.current.add(normalizeName(p.name));
         });
+        setParticipants(updated);
+        broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
+      } else {
+        const updated = dedupeParticipants(
+          participantsRef.current.map((p) => {
+            if (p.isHost) return p;
+            const role = driveModeRoleBackupRef.current.get(p.peerId) ?? 'Viewer';
+            return { ...p, role };
+          })
+        );
+        // controllerMemoryRef must mirror the restored roles; otherwise a
+        // reconnecting Viewer would inherit the drive-mode Controller memory.
+        updated.forEach((p) => {
+          if (p.isHost) return;
+          const norm = normalizeName(p.name);
+          if (p.role === 'Controller') controllerMemoryRef.current.add(norm);
+          else controllerMemoryRef.current.delete(norm);
+        });
+        driveModeRoleBackupRef.current.clear();
         setParticipants(updated);
         broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
       }
