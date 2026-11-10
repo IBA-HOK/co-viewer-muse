@@ -57,7 +57,7 @@ function mountHook() {
   act(() => latest!.loadMedia('sm9'));
   const playerId = readPlayerId(view.container);
 
-  const emitPlayerStatus = (playerStatus: number) => {
+  const emitEvent = (eventName: string, data?: Record<string, unknown>) => {
     act(() => {
       window.dispatchEvent(
         new MessageEvent('message', {
@@ -65,12 +65,16 @@ function mountHook() {
           data: {
             sourceConnectorType: 0,
             playerId,
-            eventName: 'playerStatusChange',
-            data: { playerStatus },
+            eventName,
+            data,
           },
         })
       );
     });
+  };
+
+  const emitPlayerStatus = (playerStatus: number) => {
+    emitEvent('playerStatusChange', { playerStatus });
   };
 
   return {
@@ -82,6 +86,7 @@ function mountHook() {
     },
     onLocalEvent,
     isRemoteSyncingRef,
+    emitEvent,
     emitPlayerStatus,
     unmount: view.unmount,
   };
@@ -130,6 +135,29 @@ describe('useNiconicoPlayer · playerStatusChange', () => {
     emitPlayerStatus(99);
 
     expect(onLocalEvent).not.toHaveBeenCalled();
+  });
+
+  it('reloads the same video after an error while loadMedia stays deduped', () => {
+    const { result, emitEvent } = mountHook();
+    const iframe = document.querySelector('iframe');
+    if (!iframe) throw new Error('niconico iframe not mounted');
+    const srcSetter = vi.spyOn(HTMLIFrameElement.prototype, 'src', 'set');
+
+    emitEvent('loadComplete');
+    expect(result.current.ready).toBe(true);
+
+    emitEvent('error', { code: 'possibly_deleted_video' });
+    expect(result.current.error).not.toBeNull();
+
+    // The normal dedupe must not reload the iframe for the same video.
+    act(() => result.current.loadMedia('sm9'));
+    expect(srcSetter).not.toHaveBeenCalled();
+
+    // The explicit recovery path bypasses the dedupe and resets error/ready.
+    act(() => result.current.reloadMedia());
+    expect(srcSetter).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+    expect(result.current.ready).toBe(false);
   });
 
   it('still suppresses remote-operation echoes', () => {

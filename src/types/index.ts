@@ -122,6 +122,12 @@ export type YouTubePlaybackQuality =
 
 export interface PlayerController {
   loadMedia(videoId: string, suggestedQuality?: YouTubePlaybackQuality | string): void;
+  /**
+   * Force a reload of the currently loaded media, bypassing `loadMedia`'s
+   * same-id dedupe. Used by error-recovery UI (e.g. Niconico's "再読み込み")
+   * where the iframe was kept mounted but playback failed.
+   */
+  reloadMedia?(): void;
   play(): void;
   pause(): void;
   seekTo(seconds: number): void;

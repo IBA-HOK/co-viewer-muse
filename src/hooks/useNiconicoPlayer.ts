@@ -294,6 +294,20 @@ export function useNiconicoPlayer(
     }
   }, []);
 
+  /**
+   * Explicit recovery reload. Unlike `loadMedia`, this intentionally bypasses
+   * the same-id dedupe: when the error UI is shown the iframe src and
+   * `loadedVideoIdRef` are still set, so a normal `loadMedia` call would be a
+   * no-op. Clearing the ref and reusing `loadMedia` also resets error, ready,
+   * pendingSeek and shouldPlay before reassigning the iframe src.
+   */
+  const reloadMedia = useCallback(() => {
+    const videoId = loadedVideoIdRef.current;
+    if (!videoId) return;
+    loadedVideoIdRef.current = null;
+    loadMedia(videoId);
+  }, [loadMedia]);
+
   const play = useCallback(() => {
     postCommand(iframeRef.current, playerIdRef.current, 'play');
   }, []);
@@ -345,6 +359,7 @@ export function useNiconicoPlayer(
     insecureContext,
     containerRef,
     loadMedia,
+    reloadMedia,
     play,
     pause,
     seekTo,

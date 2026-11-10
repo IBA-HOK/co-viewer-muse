@@ -140,7 +140,11 @@ function NiconicoInner(props: PlayerProps) {
             {props.videoId && (
               <button
                 type="button"
-                onClick={() => props.controllerRef.current?.loadMedia(props.videoId as string)}
+                onClick={() => {
+                  const controller = props.controllerRef.current;
+                  if (controller?.reloadMedia) controller.reloadMedia();
+                  else controller?.loadMedia(props.videoId as string);
+                }}
                 className="nothing-mono border border-[var(--nothing-border)] bg-[var(--nothing-surface-raised)] px-3 py-1 text-xs tracking-widest text-[var(--nothing-text)] hover:bg-[var(--nothing-surface-hover)]"
               >
                 再読み込み
