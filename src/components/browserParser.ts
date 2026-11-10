@@ -519,8 +519,10 @@ async function fetchYouTube(query: string, signal?: AbortSignal, page = 1): Prom
   if (text) {
     const results = extractYouTubeResults(text);
     if (results.length > 0) {
-      setCached(query, page, results);
-      return { ok: true, results, hasMore: results.length >= PAGE_SIZE };
+      // The scrape URL has no page parameter, so it always returns page 1.
+      // Treat it as single-page-only: never cache it under a page key and
+      // always report that there are no further pages.
+      return { ok: true, results, hasMore: false };
     }
     return { ok: false, reason: 'empty' };
   }
@@ -565,8 +567,9 @@ async function fetchNico(query: string, signal?: AbortSignal, page = 1): Promise
   if (text) {
     const results = extractNicoResults(text);
     if (results.length > 0) {
-      setNicoCached(query, page, results);
-      return { ok: true, results, hasMore: results.length >= PAGE_SIZE };
+      // Like the YouTube scrape, the Nico search URL has no page parameter.
+      // Single-page-only: skip the page cache and never advertise more pages.
+      return { ok: true, results, hasMore: false };
     }
     return { ok: false, reason: 'empty' };
   }

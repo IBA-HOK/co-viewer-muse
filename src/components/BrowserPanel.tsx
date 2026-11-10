@@ -74,6 +74,14 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
   const containerRef = useRef<HTMLUListElement | null>(null);
   const sentinelRef = useRef<HTMLLIElement | null>(null);
   const loadMoreAbortRef = useRef<AbortController | null>(null);
+  const hasMoreRef = useRef(true);
+
+  // Keep a ref in sync with hasMore so a stale IntersectionObserver callback
+  // cannot trigger another request after we discover there are no more pages.
+  const updateHasMore = (value: boolean) => {
+    hasMoreRef.current = value;
+    setHasMore(value);
+  };
 
   useEffect(() => {
     try {
@@ -117,19 +125,19 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
           outcome.results.forEach((r) => seenIdsRef.current.add(`${r.platform}:${r.id}`));
           setResults(outcome.results);
           setPage(1);
-          setHasMore(outcome.hasMore ?? outcome.results.length >= PAGE_SIZE);
+          updateHasMore(outcome.hasMore ?? outcome.results.length >= PAGE_SIZE);
           setError(null);
         } else if (outcome.reason === 'network') {
           seenIdsRef.current.clear();
           setResults([]);
-          setHasMore(false);
+          updateHasMore(false);
           setError(
             '検索に失敗しました。ネットワークやプロキシ/CORS の制限で取得できませんでした。'
           );
         } else {
           seenIdsRef.current.clear();
           setResults([]);
-          setHasMore(false);
+          updateHasMore(false);
           setError('結果が見つかりませんでした');
         }
       })
@@ -147,7 +155,7 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
   };
 
   const loadMore = useCallback(async () => {
-    if (loading || loadingMore || !hasMore || loadingLockRef.current) return;
+    if (loading || loadingMore || !hasMore || !hasMoreRef.current || loadingLockRef.current) return;
     const q = queryRef.current.trim();
     if (!q) return;
     loadingLockRef.current = true;
@@ -164,11 +172,15 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
         if (deduped.length > 0) {
           deduped.forEach((r) => seenIdsRef.current.add(`${r.platform}:${r.id}`));
           setResults((prev) => [...prev, ...deduped]);
+          setPage(nextPage);
+          updateHasMore(outcome.hasMore ?? outcome.results.length >= PAGE_SIZE);
+        } else {
+          // A page with only already-seen results cannot make progress. Stop
+          // pagination even if the source claims there are more pages.
+          updateHasMore(false);
         }
-        setPage(nextPage);
-        setHasMore(outcome.hasMore ?? outcome.results.length >= PAGE_SIZE);
       } else if (outcome.reason === 'empty') {
-        setHasMore(false);
+        updateHasMore(false);
       } else {
         setError('検索に失敗しました。ネットワークやプロキシ/CORS の制限で取得できませんでした。');
       }

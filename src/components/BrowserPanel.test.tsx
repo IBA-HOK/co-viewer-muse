@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import BrowserPanel from './BrowserPanel';
 
 // Pagination harness: IntersectionObserver mock for infinite scroll sentinel
@@ -159,5 +159,79 @@ describe('BrowserPanel harness', () => {
     expect(globalThis.IntersectionObserver).toBeDefined();
     // verify mock was constructed with correct signature
     expect(vi.mocked(globalThis.IntersectionObserver)).toBeDefined();
+  });
+
+  it('stops pagination when loadMore returns only duplicate results', async () => {
+    const makeItems = () =>
+      Array.from({ length: 30 }, (_, i) => ({
+        type: 'video',
+        videoId: `dup-${i}`,
+        title: `dup item ${i}`,
+        viewCount: 1,
+        published: 1,
+      }));
+    const page2Requests: string[] = [];
+    const fetchMock = vi.fn(async (url: string): Promise<Response> => {
+      const u = String(url);
+      if (u.includes('/api/v1/search')) {
+        if (u.includes('page=2')) page2Requests.push(u);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => makeItems(),
+          text: async () => JSON.stringify(makeItems()),
+        } as unknown as Response;
+      }
+      return {
+        ok: false,
+        status: 500,
+        json: async () => null,
+        text: async () => '',
+      } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    class ConstructorIO {
+      constructor(cb: IntersectionObserverCallback) {
+        (globalThis as unknown as { __ioCb: IntersectionObserverCallback }).__ioCb = cb;
+      }
+      observe = mockObserve;
+      unobserve = mockUnobserve;
+      disconnect = mockDisconnect;
+      root = null;
+      rootMargin = '';
+      thresholds = [];
+      takeRecords = () => [];
+    }
+    vi.stubGlobal('IntersectionObserver', ConstructorIO);
+
+    render(<BrowserPanel onAddToQueue={vi.fn()} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'duplicate only page' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+
+    await waitFor(() => expect(screen.getByText('dup item 0')).toBeTruthy());
+    await waitFor(() =>
+      expect(
+        (globalThis as unknown as { __ioCb?: IntersectionObserverCallback }).__ioCb
+      ).toBeTypeOf('function')
+    );
+    const ioCb = (globalThis as unknown as { __ioCb: IntersectionObserverCallback }).__ioCb;
+
+    // Sentinel intersects -> request page 2, which contains only duplicates.
+    await act(async () => {
+      ioCb([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+    });
+    await waitFor(() => expect(page2Requests.length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByText('— END —')).toBeTruthy());
+    const page2CallsAfterLoad = page2Requests.length;
+
+    // A stale observer callback must not issue another request.
+    await act(async () => {
+      ioCb([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(page2Requests.length).toBe(page2CallsAfterLoad);
   });
 });

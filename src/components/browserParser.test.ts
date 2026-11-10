@@ -655,3 +655,65 @@ describe('pagination', () => {
     expect(decoded).toContain('_offset=0');
   });
 });
+
+describe('HTML fallback pagination (Issue #9)', () => {
+  const makeYtHtml = (): string =>
+    `<script>ytInitialData = ${JSON.stringify({
+      contents: Array.from({ length: PAGE_SIZE }, (_, i) => ({
+        videoRenderer: {
+          videoId: `html-page-${i}`,
+          title: { runs: [{ text: `HTML result ${i}` }] },
+          thumbnail: { thumbnails: [{ url: `https://i.ytimg.com/vi/html-page-${i}/hq720.jpg` }] },
+        },
+      })),
+    })};</script>`;
+
+  it('page 2 HTML fallback reports hasMore=false', async () => {
+    const fetchMock = vi.fn(async (url: string): Promise<Response> => {
+      const u = String(url);
+      // Every Invidious route (direct + proxied) is down.
+      if (u.includes('/api/v1/search')) throw new Error('invidious down');
+      if (u.includes('youtube.com/results')) return mockTextResponse(makeYtHtml(), true, 200);
+      return mockTextResponse('', false, 500);
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const out = await fetchSearchResults(
+      'youtube',
+      'issue9-html-fallback-' + Date.now() + Math.random(),
+      undefined,
+      2
+    );
+    expect(out.ok).toBe(true);
+    if (out.ok) {
+      expect(out.results.length).toBe(PAGE_SIZE);
+      expect(out.hasMore).toBe(false);
+    }
+  });
+
+  it('does not cache HTML fallback results under the page 2 key', async () => {
+    let htmlCalls = 0;
+    const fetchMock = vi.fn(async (url: string): Promise<Response> => {
+      const u = String(url);
+      if (u.includes('/api/v1/search')) throw new Error('invidious down');
+      if (u.includes('youtube.com/results')) {
+        htmlCalls++;
+        return mockTextResponse(makeYtHtml(), true, 200);
+      }
+      return mockTextResponse('', false, 500);
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    const q = 'issue9-html-cache-' + Date.now() + Math.random();
+    const first = await fetchSearchResults('youtube', q, undefined, 2);
+    expect(first.ok).toBe(true);
+    if (first.ok) expect(first.results.length).toBe(PAGE_SIZE);
+    const callsAfterFirst = htmlCalls;
+    expect(callsAfterFirst).toBeGreaterThan(0);
+
+    // If the page-2 result had been cached, this call would not hit the network.
+    const second = await fetchSearchResults('youtube', q, undefined, 2);
+    expect(second.ok).toBe(true);
+    expect(htmlCalls).toBeGreaterThan(callsAfterFirst);
+  });
+});
