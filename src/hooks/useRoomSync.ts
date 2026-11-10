@@ -717,7 +717,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           applyRemote(() => {
             controllerRef.current?.loadMedia(msg.videoId);
             controllerRef.current?.seekTo(msg.currentTime);
+            // Some platforms (YouTube loadVideoById, Niconico loadComplete)
+            // start playback as part of loading. When the host is paused, stop
+            // it explicitly so joining/reconnecting guests stay paused.
             if (msg.isPlaying) controllerRef.current?.play();
+            else controllerRef.current?.pause();
           });
           break;
         }

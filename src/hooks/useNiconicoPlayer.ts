@@ -222,12 +222,14 @@ export function useNiconicoPlayer(
           // The embed finished its handshake/load; a stale BUFFERING flag would
           // suppress drift correction forever.
           bufferingRef.current = false;
+          // Apply a queued seek whether the video should play or stay paused:
+          // a guest joining a paused room must still land at the host position.
+          if (pendingSeekRef.current != null) {
+            postCommand(iframe, playerIdRef.current, 'seek', {
+              time: Math.round(pendingSeekRef.current * 1000),
+            });
+          }
           if (shouldPlayRef.current) {
-            if (pendingSeekRef.current != null) {
-              postCommand(iframe, playerIdRef.current, 'seek', {
-                time: Math.round(pendingSeekRef.current * 1000),
-              });
-            }
             postCommand(iframe, playerIdRef.current, 'play');
             shouldPlayRef.current = false;
           }
@@ -309,9 +311,14 @@ export function useNiconicoPlayer(
   }, [loadMedia]);
 
   const play = useCallback(() => {
+    // Remember the intent so a play requested before the embed finishes
+    // loading is replayed on `loadComplete`.
+    shouldPlayRef.current = true;
     postCommand(iframeRef.current, playerIdRef.current, 'play');
   }, []);
   const pause = useCallback(() => {
+    // Cancel any pending auto-play from the load handshake.
+    shouldPlayRef.current = false;
     postCommand(iframeRef.current, playerIdRef.current, 'pause');
   }, []);
   const seekTo = useCallback((seconds: number) => {

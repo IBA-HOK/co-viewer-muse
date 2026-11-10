@@ -160,6 +160,40 @@ describe('useNiconicoPlayer · playerStatusChange', () => {
     expect(result.current.ready).toBe(false);
   });
 
+  it('does not auto-play after loadComplete when paused during loading, but applies the seek', () => {
+    const { result, emitEvent } = mountHook();
+    const iframe = document.querySelector('iframe');
+    if (!iframe || !iframe.contentWindow) {
+      throw new Error('niconico iframe not mounted');
+    }
+    const postMessage = vi.spyOn(iframe.contentWindow, 'postMessage');
+
+    // Simulate a guest receiving a paused room snapshot: seek + pause arrive
+    // while the embed is still loading.
+    act(() => result.current.seekTo(12));
+    act(() => result.current.pause());
+    postMessage.mockClear();
+
+    emitEvent('loadComplete');
+
+    const loadingCommands = postMessage.mock.calls.map(
+      ([message]) => (message as { eventName?: string }).eventName
+    );
+    expect(loadingCommands).not.toContain('play');
+    expect(loadingCommands).toContain('seek');
+    const seek = postMessage.mock.calls.find(
+      ([message]) => (message as { eventName?: string }).eventName === 'seek'
+    );
+    expect((seek?.[0] as { data?: { time?: number } }).data?.time).toBe(12000);
+
+    // A later explicit play request must still reach the embed.
+    act(() => result.current.play());
+    const playCommand = postMessage.mock.calls.find(
+      ([message]) => (message as { eventName?: string }).eventName === 'play'
+    );
+    expect(playCommand).toBeDefined();
+  });
+
   it('still suppresses remote-operation echoes', () => {
     const { onLocalEvent, isRemoteSyncingRef, emitPlayerStatus } = mountHook();
     isRemoteSyncingRef.current = true;
