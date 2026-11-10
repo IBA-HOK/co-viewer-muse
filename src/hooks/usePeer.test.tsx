@@ -1,0 +1,212 @@
+/**
+ * @vitest-environment jsdom
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, renderHook } from '@testing-library/react';
+import { usePeer } from './usePeer';
+import type { UsePeerOptions } from './usePeer';
+import type { SyncMessage } from '../types';
+
+type Handler = (...args: unknown[]) => void;
+
+const peerMock = vi.hoisted(() => {
+  class MockDataConnection {
+    peer: string;
+    open = false;
+    metadata?: Record<string, unknown>;
+    handlers = new Map<string, Handler[]>();
+    send = vi.fn();
+    close = vi.fn(() => {
+      this.open = false;
+      this.emit('close');
+    });
+
+    constructor(peer: string, opts?: { metadata?: Record<string, unknown> }) {
+      this.peer = peer;
+      this.metadata = opts?.metadata;
+    }
+
+    on(event: string, cb: Handler): this {
+      const list = this.handlers.get(event) ?? [];
+      list.push(cb);
+      this.handlers.set(event, list);
+      return this;
+    }
+
+    once(event: string, cb: Handler): this {
+      const wrap: Handler = (...args) => {
+        this.off(event, wrap);
+        cb(...args);
+      };
+      return this.on(event, wrap);
+    }
+
+    off(event: string, cb: Handler): this {
+      const list = this.handlers.get(event) ?? [];
+      this.handlers.set(
+        event,
+        list.filter((h) => h !== cb)
+      );
+      return this;
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      for (const cb of [...(this.handlers.get(event) ?? [])]) cb(...args);
+    }
+  }
+
+  class MockPeer {
+    static instances: MockPeer[] = [];
+    handlers = new Map<string, Handler[]>();
+    connections: MockDataConnection[] = [];
+    reconnect = vi.fn();
+    destroy = vi.fn();
+
+    constructor() {
+      MockPeer.instances.push(this);
+    }
+
+    on(event: string, cb: Handler): this {
+      const list = this.handlers.get(event) ?? [];
+      list.push(cb);
+      this.handlers.set(event, list);
+      return this;
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      for (const cb of [...(this.handlers.get(event) ?? [])]) cb(...args);
+    }
+
+    connect = vi.fn((id: string, opts?: { metadata?: Record<string, unknown> }) => {
+      const conn = new MockDataConnection(id, opts);
+      this.connections.push(conn);
+      return conn;
+    });
+  }
+
+  return { MockPeer, MockDataConnection };
+});
+
+vi.mock('peerjs', () => ({ default: peerMock.MockPeer }));
+
+function makeOptions(roomIdFromUrl: string | null): UsePeerOptions {
+  return {
+    roomIdFromUrl,
+    displayName: roomIdFromUrl ? 'Guest' : 'Host',
+    onMessage: vi.fn(),
+    onGuestConnected: vi.fn(),
+    onGuestDisconnected: vi.fn(),
+    onHostDisconnected: vi.fn(),
+    onConnected: vi.fn(),
+  };
+}
+
+function openConn(conn: InstanceType<typeof peerMock.MockDataConnection>): void {
+  conn.open = true;
+  conn.emit('open');
+}
+
+function makeMsg(n: number): SyncMessage {
+  return { type: 'PLAY', currentTime: n, senderId: 'sender-1' };
+}
+
+describe('usePeer · stale DataConnection identity guards', () => {
+  beforeEach(() => {
+    peerMock.MockPeer.instances.length = 0;
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('guest ignores close/error from conn1 after reconnecting to conn2', () => {
+    const opts = makeOptions('room-1');
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    expect(peer).toBeDefined();
+
+    act(() => peer.emit('open', 'guest-self'));
+    const conn1 = peer.connections[0];
+    expect(conn1).toBeDefined();
+    act(() => openConn(conn1));
+
+    expect(result.current.connected).toBe(true);
+
+    act(() => result.current.reconnect());
+    const conn2 = peer.connections[1];
+    expect(conn2).toBeDefined();
+    expect(conn2).not.toBe(conn1);
+
+    act(() => openConn(conn2));
+    expect(result.current.connected).toBe(true);
+
+    // Late events from the replaced connection must not tear down conn2.
+    act(() => {
+      conn1.emit('close');
+      conn1.emit('error');
+    });
+
+    expect(result.current.connected).toBe(true);
+    expect(opts.onHostDisconnected).not.toHaveBeenCalled();
+    expect(opts.onConnected).toHaveBeenCalledTimes(2);
+  });
+
+  it('guest ignores a delayed open from conn1 (no extra onConnected / flush)', () => {
+    const opts = makeOptions('room-1');
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'guest-self'));
+    const conn1 = peer.connections[0];
+
+    // conn1 is not open yet: the message is queued for the host connection.
+    act(() => result.current.broadcast(makeMsg(1)));
+
+    act(() => result.current.reconnect());
+    const conn2 = peer.connections[1];
+    act(() => openConn(conn2));
+
+    expect(conn2.send).toHaveBeenCalledTimes(1);
+    expect(opts.onConnected).toHaveBeenCalledTimes(1);
+
+    // conn1's delayed open must be ignored entirely.
+    act(() => openConn(conn1));
+
+    expect(conn2.send).toHaveBeenCalledTimes(1);
+    expect(opts.onConnected).toHaveBeenCalledTimes(1);
+  });
+
+  it('host ignores close from conn1 after replacing it with conn2 for the same peer', () => {
+    const opts = makeOptions(null);
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn1 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn1));
+    act(() => openConn(conn1));
+    expect(opts.onGuestConnected).toHaveBeenCalledTimes(1);
+
+    const conn2 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn2));
+    expect(conn1.close).toHaveBeenCalled();
+    act(() => openConn(conn2));
+
+    act(() => conn1.emit('close'));
+
+    expect(opts.onGuestDisconnected).not.toHaveBeenCalled();
+
+    const msg = makeMsg(2);
+    act(() => result.current.broadcast(msg));
+
+    expect(conn2.send).toHaveBeenCalledWith(msg);
+    expect(conn1.send).not.toHaveBeenCalled();
+  });
+});

@@ -163,10 +163,20 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
 
   const wireConn = useCallback(
     (conn: DataConnection) => {
+      // A replaced DataConnection may still fire open/close/error/data after a
+      // reconnection. Only the connection currently registered for its role may
+      // mutate state, otherwise a stale close would tear down a healthy session.
+      const isCurrentConn = (): boolean =>
+        isHostRef.current
+          ? guestConnsRef.current.get(conn.peer) === conn
+          : hostConnRef.current === conn;
+
       conn.on('data', (data) => {
+        if (!isCurrentConn()) return;
         cbRef.current.onMessage(data as SyncMessage, conn.peer);
       });
       conn.on('open', () => {
+        if (!isCurrentConn()) return;
         clearConnectTimer();
         attemptRef.current = 0;
         flushQueue(isHostRef.current ? conn.peer : '__host__');
@@ -176,6 +186,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
         }
       });
       conn.on('close', () => {
+        if (!isCurrentConn()) return;
         if (isHostRef.current) {
           guestConnsRef.current.delete(conn.peer);
           guestJoinedFiredRef.current.delete(conn.peer);
@@ -188,6 +199,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
         }
       });
       conn.on('error', () => {
+        if (!isCurrentConn()) return;
         if (!isHostRef.current) {
           clearConnectTimer();
           setConnected(false);
@@ -207,7 +219,18 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       const conn = peer.connect(id, {
         metadata: { name: nameRef.current },
       });
+      const prevConn = hostConnRef.current;
       hostConnRef.current = conn;
+      wireConn(conn);
+      // Register the replacement before closing the old conn: its synchronous
+      // close event is then ignored by the identity guard in wireConn.
+      if (prevConn && prevConn !== conn) {
+        try {
+          prevConn.close();
+        } catch {
+          /* noop */
+        }
+      }
       // Manual connect timeout: PeerJS 1.5.x has no connect timeout option, so
       // abandon the attempt if the DataChannel hasn't opened in time.
       connectTimerRef.current = window.setTimeout(() => {
@@ -224,7 +247,6 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
           scheduleReconnect();
         }
       }, CONNECT_TIMEOUT_MS);
-      wireConn(conn);
     },
     [wireConn, clearConnectTimer]
   );
@@ -300,8 +322,18 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       });
 
       peer.on('connection', (conn) => {
+        const prevConn = guestConnsRef.current.get(conn.peer);
         guestConnsRef.current.set(conn.peer, conn);
         wireConn(conn);
+        // Same peer reconnected: replace the old entry first, then close the
+        // old conn so its close event cannot delete the new registration.
+        if (prevConn && prevConn !== conn) {
+          try {
+            prevConn.close();
+          } catch {
+            /* noop */
+          }
+        }
         const name = (conn.metadata?.name as string) ?? 'Guest';
         const fireOnce = (): void => {
           if (guestJoinedFiredRef.current.has(conn.peer)) return;
