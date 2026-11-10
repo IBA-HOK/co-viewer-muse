@@ -6,6 +6,7 @@ import rnnoiseWasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url';
 import rnnoiseSimdWasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url';
 import type { UsePeerResult } from './usePeer';
 import type { UseRoomSyncResult } from './useRoomSync';
+import { resolvePeerGain, type SavedMixerValues } from './voiceMixer';
 
 export interface UseVoiceChatOptions {
   peer: UsePeerResult;
@@ -177,15 +178,12 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       analyser.fftSize = 256;
       analyser.smoothingTimeConstant = 0.3;
       const gain = ctx.createGain();
+      let savedMixer: SavedMixerValues | null = null;
       try {
         const saved = localStorage.getItem('co-viewer:mixer');
-        if (saved) {
-          const m = JSON.parse(saved) as { vcPeers?: Record<string, number>; vcMaster?: number };
-          const v = m.vcPeers?.[peerId];
-          if (typeof v === 'number') gain.gain.value = Math.max(0, Math.min(1, v / 100));
-          else if (typeof m.vcMaster === 'number') gain.gain.value = Math.max(0, Math.min(1, m.vcMaster / 100));
-        }
+        if (saved) savedMixer = JSON.parse(saved) as SavedMixerValues;
       } catch {}
+      gain.gain.value = resolvePeerGain(savedMixer, peerId);
       source.connect(analyser);
       analyser.connect(gain);
       const master = masterGainRef.current;
