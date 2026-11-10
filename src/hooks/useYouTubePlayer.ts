@@ -182,6 +182,7 @@ export function useYouTubePlayer(
             try {
               const state = e.data;
               stateRef.current = state;
+              if (state === YT.PlayerState.PLAYING) setError(null);
               const wasRecovering = seekRecoveringRef.current;
               bufferingRef.current = state === YT.PlayerState.BUFFERING;
 
@@ -288,6 +289,10 @@ export function useYouTubePlayer(
     ) {
       return;
     }
+    // A new load replaces the previous video, so an error from that video must
+    // not stay overlaid. Only clear once the dedupe check has passed: skipping
+    // the load must not hide an error for a video that is still current.
+    setError(null);
     loadedVideoIdRef.current = videoId;
     loadedVideoAtRef.current = now;
     // A new video invalidates any position queued against the old one.

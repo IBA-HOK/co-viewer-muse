@@ -43,6 +43,10 @@ class FakePlayer {
   emitState(state: number) {
     this.events.onStateChange?.({ target: this, data: state });
   }
+
+  emitError(data: number) {
+    this.events.onError?.({ data });
+  }
 }
 
 let player: FakePlayer | null = null;
@@ -287,5 +291,41 @@ describe('useYouTubePlayer · buffering-aware seeking', () => {
     });
     expect(player!.seekTo).toHaveBeenCalledTimes(1);
     expect(player!.seekTo).toHaveBeenCalledWith(15, true);
+  });
+});
+
+describe('useYouTubePlayer · playback errors', () => {
+  it('clears the error and loads a different video after a playback error', async () => {
+    const { result } = await mountHook();
+    act(() => player!.emitError(150));
+    expect(result.current.error).not.toBeNull();
+
+    act(() => result.current.loadMedia('bbbbbbbbbbb'));
+
+    expect(player!.loadVideoById).toHaveBeenCalledWith('bbbbbbbbbbb');
+    expect(result.current.error).toBeNull();
+  });
+
+  it('does not clear the error when the same video reload is deduped', async () => {
+    const { result } = await mountHook();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    act(() => result.current.loadMedia('aaaaaaaaaaa'));
+    act(() => player!.emitError(150));
+
+    act(() => result.current.loadMedia('aaaaaaaaaaa'));
+
+    expect(player!.loadVideoById).toHaveBeenCalledTimes(1);
+    expect(result.current.error).not.toBeNull();
+    nowSpy.mockRestore();
+  });
+
+  it('clears the error once playback actually starts', async () => {
+    const { result } = await mountHook();
+    act(() => player!.emitError(101));
+    expect(result.current.error).not.toBeNull();
+
+    act(() => player!.emitState(PLAYER_STATE.PLAYING));
+
+    expect(result.current.error).toBeNull();
   });
 });
