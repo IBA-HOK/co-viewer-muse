@@ -78,10 +78,27 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
 
   // Keep a ref in sync with hasMore so a stale IntersectionObserver callback
   // cannot trigger another request after we discover there are no more pages.
-  const updateHasMore = (value: boolean) => {
+  const updateHasMore = useCallback((value: boolean) => {
     hasMoreRef.current = value;
     setHasMore(value);
-  };
+  }, []);
+
+  // Abort every in-flight request and reset the pagination/search state. Old
+  // promise callbacks compare their controller against the refs above before
+  // touching state, so a late response cannot revive a cancelled search.
+  const cancelPendingSearches = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    loadMoreAbortRef.current?.abort();
+    loadMoreAbortRef.current = null;
+    queryRef.current = '';
+    loadingLockRef.current = false;
+    seenIdsRef.current.clear();
+    setLoading(false);
+    setLoadingMore(false);
+    setPage(1);
+    updateHasMore(false);
+  }, [updateHasMore]);
 
   useEffect(() => {
     try {
@@ -101,25 +118,24 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
   const runSearch = () => {
     const q = query.trim();
     if (!q) return;
-    queryRef.current = q;
     const parsed = parseMediaInput(q);
     if (parsed) {
+      cancelPendingSearches();
       onAddToQueue(q);
       setQuery('');
       setError(null);
       setResults([]);
       return;
     }
-    abortRef.current?.abort();
-    loadMoreAbortRef.current?.abort();
+    cancelPendingSearches();
+    queryRef.current = q;
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setLoading(true);
-    setLoadingMore(false);
     setError(null);
     fetchSearchResults(engine, q, ctrl.signal, 1)
       .then((outcome) => {
-        if (ctrl.signal.aborted) return;
+        if (abortRef.current !== ctrl || ctrl.signal.aborted) return;
         if (outcome.ok) {
           seenIdsRef.current.clear();
           outcome.results.forEach((r) => seenIdsRef.current.add(`${r.platform}:${r.id}`));
@@ -142,14 +158,13 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
         }
       })
       .catch(() => {
-        if (!ctrl.signal.aborted) {
+        if (abortRef.current === ctrl && !ctrl.signal.aborted) {
           setError('検索に失敗しました（プロキシがブロックされた可能性があります）');
         }
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) {
+        if (abortRef.current === ctrl && !ctrl.signal.aborted) {
           setLoading(false);
-          setLoadingMore(false);
         }
       });
   };
@@ -166,7 +181,7 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
     const nextPage = page + 1;
     try {
       const outcome = await fetchSearchResults(engine, q, ctrl.signal, nextPage);
-      if (ctrl.signal.aborted) return;
+      if (loadMoreAbortRef.current !== ctrl || ctrl.signal.aborted) return;
       if (outcome.ok) {
         const deduped = outcome.results.filter((r) => !seenIdsRef.current.has(`${r.platform}:${r.id}`));
         if (deduped.length > 0) {
@@ -185,17 +200,24 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
         setError('検索に失敗しました。ネットワークやプロキシ/CORS の制限で取得できませんでした。');
       }
     } catch {
-      if (!ctrl.signal.aborted) setError('検索に失敗しました（プロキシがブロックされた可能性があります）');
+      if (loadMoreAbortRef.current === ctrl && !ctrl.signal.aborted) {
+        setError('検索に失敗しました（プロキシがブロックされた可能性があります）');
+      }
     } finally {
-      if (!ctrl.signal.aborted) setLoadingMore(false);
-      else setLoadingMore(false);
-      loadingLockRef.current = false;
+      // A stale request must not clear the loading state or release the lock
+      // that belongs to a newer loadMore (or search) request.
+      if (loadMoreAbortRef.current === ctrl) {
+        setLoadingMore(false);
+        loadingLockRef.current = false;
+      }
     }
   }, [engine, page, hasMore, loading, loadingMore, queryRef]);
 
-  useEffect(() => {
-    loadMoreAbortRef.current?.abort();
-  }, [engine]);
+  const switchEngine = (next: 'youtube' | 'nico') => {
+    if (next === engine) return;
+    cancelPendingSearches();
+    setEngine(next);
+  };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -271,7 +293,7 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
               <div className="flex border border-[var(--nothing-border)]">
                 <button
                   type="button"
-                  onClick={() => setEngine('youtube')}
+                  onClick={() => switchEngine('youtube')}
                   className={`nothing-mono px-3 py-1 text-xs tracking-widest ${
                     engine === 'youtube'
                       ? 'bg-[var(--nothing-red)] text-white'
@@ -282,7 +304,7 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setEngine('nico')}
+                  onClick={() => switchEngine('nico')}
                   className={`nothing-mono px-3 py-1 text-xs tracking-widest ${
                     engine === 'nico'
                       ? 'bg-[var(--nothing-red)] text-white'

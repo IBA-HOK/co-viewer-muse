@@ -42,6 +42,39 @@ function mockFetchSuccess(): void {
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function jsonResponse(data: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => data,
+    text: async () => JSON.stringify(data),
+  } as unknown as Response;
+}
+
+function invidiousItems(prefix: string, count: number) {
+  return Array.from({ length: count }, (_, i) => ({
+    type: 'video',
+    videoId: `${prefix}-${i}`,
+    title: `${prefix} item ${i}`,
+    viewCount: i,
+    published: 1,
+  }));
+}
+
+function latestIoCb(): IntersectionObserverCallback {
+  return (globalThis as unknown as { __ioCb: IntersectionObserverCallback }).__ioCb;
+}
+
 describe('BrowserPanel harness', () => {
   beforeEach(() => {
     if (window.localStorage) window.localStorage.clear();
@@ -233,5 +266,176 @@ describe('BrowserPanel harness', () => {
       await new Promise((resolve) => setTimeout(resolve, 30));
     });
     expect(page2Requests.length).toBe(page2CallsAfterLoad);
+  });
+
+  it('cancels a pending keyword search when a URL is submitted', async () => {
+    const onAdd = vi.fn();
+    const pending = deferred<Response>();
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('pending-url-race')) return pending.promise;
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    render(<BrowserPanel onAddToQueue={onAdd} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'pending-url-race' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(screen.getByText('SEARCHING…')).toBeTruthy();
+
+    const directUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+    fireEvent.change(input, { target: { value: directUrl } });
+    // The search button is disabled while loading, so submit via Enter just
+    // like a user can still do during an in-flight keyword search.
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(onAdd).toHaveBeenCalledWith(directUrl);
+    expect(screen.queryByText('SEARCHING…')).toBeNull();
+    expect(screen.getByText('LOAD / SEARCH')).toBeTruthy();
+
+    // The abandoned keyword search resolves late; it must not repopulate the
+    // list or restore its loading label.
+    await act(async () => {
+      pending.resolve(jsonResponse(invidiousItems('stale-url', 1)));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(screen.queryByText('stale-url item 0')).toBeNull();
+    expect(screen.queryByText('SEARCHING…')).toBeNull();
+  });
+
+  it('ignores a pending YOUTUBE response after switching to NICO', async () => {
+    const pending = deferred<Response>();
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('engine-switch-race')) return pending.promise;
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    render(<BrowserPanel onAddToQueue={vi.fn()} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'engine-switch-race' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(screen.getByText('SEARCHING…')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('NICO'));
+    expect(screen.queryByText('SEARCHING…')).toBeNull();
+
+    await act(async () => {
+      pending.resolve(jsonResponse(invidiousItems('stale-engine', 1)));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(screen.queryByText('stale-engine item 0')).toBeNull();
+    expect(screen.queryByText('SEARCHING…')).toBeNull();
+  });
+
+  it('keeps a newer loadMore/loading state when an old loadMore resolves late', async () => {
+    const oldPage2 = deferred<Response>();
+    const newSearch = deferred<Response>();
+    const newPage2 = deferred<Response>();
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('q=loadmore-race')) {
+        return url.includes('page=2')
+          ? oldPage2.promise
+          : Promise.resolve(jsonResponse(invidiousItems('initial', 30)));
+      }
+      if (url.includes('q=fresh-query-long')) {
+        return url.includes('page=2') ? newPage2.promise : newSearch.promise;
+      }
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    class ConstructorIO {
+      constructor(cb: IntersectionObserverCallback) {
+        (globalThis as unknown as { __ioCb: IntersectionObserverCallback }).__ioCb = cb;
+      }
+      observe = mockObserve;
+      unobserve = mockUnobserve;
+      disconnect = mockDisconnect;
+      root = null;
+      rootMargin = '';
+      thresholds = [];
+      takeRecords = () => [];
+    }
+    vi.stubGlobal('IntersectionObserver', ConstructorIO);
+
+    const page2Calls = (query: string) =>
+      fetchMock.mock.calls.filter(([input]) => {
+        const url = String(input);
+        return url.includes(`q=${query}`) && url.includes('page=2');
+      }).length;
+
+    render(<BrowserPanel onAddToQueue={vi.fn()} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'loadmore-race' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+
+    await waitFor(() => expect(screen.getByText('initial item 0')).toBeTruthy());
+    await waitFor(() => expect(latestIoCb()).toBeTypeOf('function'));
+
+    // Start loadMore and leave its page-2 response pending.
+    await act(async () => {
+      latestIoCb()(
+        [{ isIntersecting: true } as IntersectionObserverEntry],
+        {} as IntersectionObserver
+      );
+    });
+    await waitFor(() => expect(page2Calls('loadmore-race')).toBeGreaterThan(0));
+    expect(screen.getByText('LOADING…')).toBeTruthy();
+
+    // Start a fresh keyword search while the old loadMore is still pending.
+    fireEvent.change(input, { target: { value: 'fresh-query-long' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+    expect(screen.getByText('SEARCHING…')).toBeTruthy();
+
+    await act(async () => {
+      newSearch.resolve(jsonResponse(invidiousItems('fresh', 30)));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await waitFor(() => expect(screen.getByText('fresh item 0')).toBeTruthy());
+
+    // Begin the fresh search's own loadMore and leave it pending.
+    await act(async () => {
+      latestIoCb()(
+        [{ isIntersecting: true } as IntersectionObserverEntry],
+        {} as IntersectionObserver
+      );
+    });
+    await waitFor(() => expect(page2Calls('fresh-query-long')).toBeGreaterThan(0));
+    expect(screen.getByText('LOADING…')).toBeTruthy();
+    const freshPage2Calls = page2Calls('fresh-query-long');
+
+    // The stale request settles after the new one is already loading. Its
+    // finally must not clear loadingMore/loadingLockRef or append its results.
+    await act(async () => {
+      oldPage2.resolve(jsonResponse(invidiousItems('stale-loadmore', 1)));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(screen.queryByText('stale-loadmore item 0')).toBeNull();
+    expect(screen.getByText('LOADING…')).toBeTruthy();
+
+    // The loading lock is still held, so the observer cannot start another
+    // page-2 request.
+    await act(async () => {
+      latestIoCb()(
+        [{ isIntersecting: true } as IntersectionObserverEntry],
+        {} as IntersectionObserver
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(page2Calls('fresh-query-long')).toBe(freshPage2Calls);
   });
 });
