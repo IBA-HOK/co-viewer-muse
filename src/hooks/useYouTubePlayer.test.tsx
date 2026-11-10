@@ -79,6 +79,27 @@ function Harness(props: {
   return <div ref={yt.containerRef} />;
 }
 
+function captureAppendedScripts() {
+  const scripts: HTMLScriptElement[] = [];
+  const original = document.head.appendChild.bind(document.head);
+  const spy = vi
+    .spyOn(document.head, 'appendChild')
+    .mockImplementation((node: Node) => {
+      if (node instanceof HTMLScriptElement) scripts.push(node);
+      return original(node);
+    });
+  return { scripts, spy };
+}
+
+function renderHarness() {
+  const isRemoteSyncingRef = { current: false } as MutableRefObject<boolean>;
+  const onLocalEvent = vi.fn();
+  const view = render(
+    <Harness isRemoteSyncingRef={isRemoteSyncingRef} onLocalEvent={onLocalEvent} />
+  );
+  return { view, isRemoteSyncingRef, onLocalEvent };
+}
+
 async function mountHook() {
   const isRemoteSyncingRef = { current: false } as MutableRefObject<boolean>;
   const onLocalEvent = vi.fn();
@@ -327,5 +348,69 @@ describe('useYouTubePlayer · playback errors', () => {
     act(() => player!.emitState(PLAYER_STATE.PLAYING));
 
     expect(result.current.error).toBeNull();
+  });
+});
+
+describe('useYouTubePlayer · YouTube API load failures', () => {
+  it('sets an error when the API script fails to load and removes the failed tag', async () => {
+    delete (window as unknown as { YT?: unknown }).YT;
+    const { scripts } = captureAppendedScripts();
+    const unhandled = vi.fn();
+    const onUnhandled = (reason: unknown) => unhandled(reason);
+    process.on('unhandledRejection', onUnhandled);
+    const { view } = renderHarness();
+    try {
+      await waitFor(() => expect(scripts).toHaveLength(1));
+      act(() => {
+        scripts[0].dispatchEvent(new Event('error'));
+      });
+      await waitFor(() => expect(latest?.error).not.toBeNull());
+      expect(latest?.error).toContain('YouTubeプレーヤーを読み込めませんでした');
+      expect(scripts[0].isConnected).toBe(false);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      view.unmount();
+    }
+  });
+
+  it('sets an error when the API script load times out', async () => {
+    vi.useFakeTimers();
+    delete (window as unknown as { YT?: unknown }).YT;
+    const { scripts } = captureAppendedScripts();
+    const { view } = renderHarness();
+    try {
+      expect(scripts).toHaveLength(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(latest?.error).toContain('YouTubeプレーヤーを読み込めませんでした');
+      expect(scripts[0].isConnected).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('retries the API load after a failure and clears the error on remount', async () => {
+    delete (window as unknown as { YT?: unknown }).YT;
+    const { scripts } = captureAppendedScripts();
+    const first = renderHarness();
+    await waitFor(() => expect(scripts).toHaveLength(1));
+    act(() => {
+      scripts[0].dispatchEvent(new Event('error'));
+    });
+    await waitFor(() => expect(latest?.error).not.toBeNull());
+    first.view.unmount();
+
+    installYouTubeStub();
+    const second = renderHarness();
+    await waitFor(() => expect(player).not.toBeNull());
+    act(() => player!.emitReady());
+    await waitFor(() => expect(latest?.ready).toBe(true));
+    expect(latest?.error).toBeNull();
+    second.view.unmount();
   });
 });

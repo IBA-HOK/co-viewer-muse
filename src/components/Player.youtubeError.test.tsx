@@ -111,3 +111,28 @@ describe('Player · YouTube error overlay', () => {
     expect(player!.loadVideoById).toHaveBeenLastCalledWith('bbbbbbbbbbb');
   });
 });
+
+describe('Player · YouTube IFrame API load failure', () => {
+  it('shows an error overlay instead of an empty player when the API script fails', async () => {
+    delete (window as unknown as { YT?: unknown }).YT;
+    const original = document.head.appendChild.bind(document.head);
+    const scripts: HTMLScriptElement[] = [];
+    vi.spyOn(document.head, 'appendChild').mockImplementation((node: Node) => {
+      if (node instanceof HTMLScriptElement) scripts.push(node);
+      return original(node);
+    });
+
+    renderPlayer();
+    await waitFor(() => expect(scripts).toHaveLength(1));
+    act(() => {
+      scripts[0].dispatchEvent(new Event('error'));
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/YouTubeプレーヤーを読み込めませんでした/)
+      ).toBeTruthy()
+    );
+    expect(scripts[0].isConnected).toBe(false);
+  });
+});

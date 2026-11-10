@@ -15,21 +15,59 @@ export interface UseYouTubePlayerResult extends PlayerController {
 
 let ytApiPromise: Promise<void> | null = null;
 
+const YOUTUBE_API_LOAD_TIMEOUT_MS = 10000;
+
 function loadYouTubeApi(): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
   if (window.YT && window.YT.Player) return Promise.resolve();
   if (ytApiPromise) return ytApiPromise;
-  ytApiPromise = new Promise<void>((resolve) => {
+  let promise: Promise<void>;
+  promise = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: number | undefined;
+    const tag = document.createElement('script');
     const prev = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
+
+    const cleanup = () => {
+      if (timer != null) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+      tag.onerror = null;
+      if (window.onYouTubeIframeAPIReady === onReady) {
+        window.onYouTubeIframeAPIReady = prev;
+      }
+    };
+
+    const fail = (reason: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // The failed script is useless and may block a later retry.
+      tag.remove();
+      if (ytApiPromise === promise) ytApiPromise = null;
+      reject(new Error(reason));
+    };
+
+    const onReady = () => {
+      if (settled) return;
+      settled = true;
       prev?.();
+      cleanup();
       resolve();
     };
-    const tag = document.createElement('script');
+
+    window.onYouTubeIframeAPIReady = onReady;
+    timer = window.setTimeout(
+      () => fail('YouTube IFrame API load timed out'),
+      YOUTUBE_API_LOAD_TIMEOUT_MS
+    );
     tag.src = 'https://www.youtube.com/iframe_api';
+    tag.onerror = () => fail('YouTube IFrame API failed to load');
     document.head.appendChild(tag);
   });
-  return ytApiPromise;
+  ytApiPromise = promise;
+  return promise;
 }
 
 /**
@@ -269,6 +307,12 @@ export function useYouTubePlayer(
           },
         },
       });
+    }).catch(() => {
+      if (!cancelled) {
+        setError(
+          'YouTubeプレーヤーを読み込めませんでした。ネットワーク・広告ブロッカー・CSP の設定を確認してください。'
+        );
+      }
     });
     return () => {
       cancelled = true;
