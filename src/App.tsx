@@ -540,6 +540,7 @@ export default function App() {
               controllerRef={roomSync.controllerRef}
               isRemoteSyncingRef={roomSync.isRemoteSyncingRef}
               reportLocalEvent={reportLocalEventWrapped}
+              onControllerReady={roomSync.onControllerReady}
               driveMode={roomSync.driveMode}
               audioOnly={roomSync.driveAudioOnly}
               titles={roomSync.titles}

@@ -431,3 +431,66 @@ describe('useRoomSync · chat sequence', () => {
     expect(result.current.chatSeq).toBe(1);
   });
 });
+
+describe('useRoomSync · STATE_SNAPSHOT before the controller is ready', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mountGuestWithoutController() {
+    return renderHook(() =>
+      useRoomSync({
+        isHost: false,
+        myId: 'guest-1',
+        connected: true,
+        myName: 'Guest',
+        broadcast: vi.fn(),
+        sendTo: vi.fn(),
+      })
+    ).result;
+  }
+
+  it('seeks and plays once when a playing snapshot is applied on ready', () => {
+    const result = mountGuestWithoutController();
+
+    act(() => {
+      result.current.handleIncoming(snapshot(true), 'host-1');
+    });
+
+    const controller = makeController();
+    act(() => {
+      result.current.controllerRef.current = controller;
+      result.current.onControllerReady();
+      result.current.onControllerReady();
+    });
+
+    expect(controller.seekTo).toHaveBeenCalledTimes(1);
+    expect(controller.seekTo).toHaveBeenCalledWith(42);
+    expect(controller.play).toHaveBeenCalledTimes(1);
+    expect(controller.pause).not.toHaveBeenCalled();
+  });
+
+  it('seeks and pauses once when a paused snapshot is applied on ready', () => {
+    const result = mountGuestWithoutController();
+
+    act(() => {
+      result.current.handleIncoming(snapshot(false), 'host-1');
+    });
+
+    const controller = makeController();
+    act(() => {
+      result.current.controllerRef.current = controller;
+      result.current.onControllerReady();
+    });
+
+    expect(controller.seekTo).toHaveBeenCalledTimes(1);
+    expect(controller.seekTo).toHaveBeenCalledWith(42);
+    expect(controller.pause).toHaveBeenCalledTimes(1);
+    expect(controller.play).not.toHaveBeenCalled();
+  });
+});

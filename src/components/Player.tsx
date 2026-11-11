@@ -12,6 +12,8 @@ export interface PlayerProps {
   controllerRef: MutableRefObject<PlayerController | null>;
   isRemoteSyncingRef: MutableRefObject<boolean>;
   reportLocalEvent: (e: LocalPlayerEvent) => void;
+  /** Notify the room-sync layer that a snapshot can now be applied. */
+  onControllerReady?: () => void;
   driveMode?: boolean;
   audioOnly?: boolean;
   titles?: Record<string, string>;
@@ -54,6 +56,13 @@ function YouTubeInner(props: PlayerProps) {
       yt.loadMedia(props.videoId, audioOnlyRef.current ? 'tiny' : 'default');
     }
   }, [props.videoId, yt.ready, yt.loadMedia]);
+
+  // Let room sync apply a snapshot that arrived before this player existed.
+  // Runs after the load effect above so the snapshot seek is not overwritten.
+  useEffect(() => {
+    if (!props.videoId || !yt.ready) return;
+    props.onControllerReady?.();
+  }, [props.videoId, yt.ready, props.onControllerReady]);
 
   useEffect(() => {
     if (!yt.ready) return;
@@ -101,6 +110,12 @@ function NiconicoInner(props: PlayerProps) {
   useEffect(() => {
     if (props.videoId) nc.loadMedia(props.videoId);
   }, [props.videoId, nc.loadMedia]);
+
+  // Let room sync apply a snapshot once the embed finished loading (loadComplete).
+  useEffect(() => {
+    if (!props.videoId || !nc.ready) return;
+    props.onControllerReady?.();
+  }, [props.videoId, nc.ready, props.onControllerReady]);
 
   useEffect(() => {
     nc.setLowBandwidthMode(audioOnly);

@@ -84,6 +84,11 @@ export interface UseRoomSyncResult {
   onGuestLeft: (peerId: string) => void;
   onHostLost: () => void;
   onGuestReady: () => void;
+  /**
+   * Called by Player once its platform player is ready. Applies a snapshot that
+   * arrived before the controller existed (e.g. immediately after JOIN).
+   */
+  onControllerReady: () => void;
   vcActive: boolean;
   vcPeers: Set<string>;
   setVcActive: (active: boolean) => void;
@@ -120,6 +125,15 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const { isHost, myId, connected, myName, broadcast, sendTo } = opts;
 
   const controllerRef = useRef<PlayerController | null>(null);
+  /**
+   * STATE_SNAPSHOT that could not be applied because the player controller was
+   * not mounted yet. It is consumed exactly once by `onControllerReady`.
+   */
+  const pendingSnapshotRef = useRef<{
+    videoId: string;
+    currentTime: number;
+    isPlaying: boolean;
+  } | null>(null);
   const isRemoteSyncingRef = useRef(false);
   const myNameRef = useRef(myName);
   myNameRef.current = myName;
@@ -761,14 +775,28 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             };
           }
           resetDriftGuard(true);
+          const controller = controllerRef.current;
+          if (!controller) {
+            // Player mounts only after `currentMedia` is set, so the first
+            // snapshot after JOIN arrives before a controller exists. Keep the
+            // position/state and replay it once the player is ready; otherwise
+            // the guest would start at 0 until the next SYNC_PING.
+            pendingSnapshotRef.current = {
+              videoId: msg.videoId,
+              currentTime: msg.currentTime,
+              isPlaying: msg.isPlaying,
+            };
+            break;
+          }
+          pendingSnapshotRef.current = null;
           applyRemote(() => {
-            controllerRef.current?.loadMedia(msg.videoId);
-            controllerRef.current?.seekTo(msg.currentTime);
+            controller.loadMedia(msg.videoId);
+            controller.seekTo(msg.currentTime);
             // Some platforms (YouTube loadVideoById, Niconico loadComplete)
             // start playback as part of loading. When the host is paused, stop
             // it explicitly so joining/reconnecting guests stay paused.
-            if (msg.isPlaying) controllerRef.current?.play();
-            else controllerRef.current?.pause();
+            if (msg.isPlaying) controller.play();
+            else controller.pause();
           });
           break;
         }
@@ -1192,6 +1220,23 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     broadcast({ type: 'REQUEST_STATE', senderId: myId ?? '' });
   }, [broadcast, myId]);
 
+  /**
+   * The player controller has just become available. Apply a snapshot that
+   * arrived while it was still null (initial JOIN). The pending snapshot is
+   * cleared before applying, so repeated ready notifications are no-ops.
+   */
+  const onControllerReady = useCallback(() => {
+    const pending = pendingSnapshotRef.current;
+    const controller = controllerRef.current;
+    if (!pending || !controller) return;
+    pendingSnapshotRef.current = null;
+    applyRemote(() => {
+      controller.seekTo(pending.currentTime);
+      if (pending.isPlaying) controller.play();
+      else controller.pause();
+    });
+  }, [applyRemote]);
+
   const setVcActive = useCallback(
     (active: boolean) => {
       setVcActiveState(active);
@@ -1433,6 +1478,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     onGuestLeft,
     onHostLost,
     onGuestReady,
+    onControllerReady,
     vcActive,
     vcPeers,
     setVcActive,
