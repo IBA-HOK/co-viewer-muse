@@ -104,7 +104,7 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
   const answeredRef = useRef<Set<string>>(new Set());
   const meterTimerRef = useRef<number | undefined>(undefined);
   /** Serializes concurrent start attempts so getUserMedia/AudioContext are created once. */
-  const startingPromiseRef = useRef<Promise<void> | null>(null);
+  const startingPromiseRef = useRef<Promise<boolean> | null>(null);
   /** Incremented per start attempt and on leave/hostStop to cancel a pending start. */
   const startSessionRef = useRef(0);
 
@@ -313,7 +313,11 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       } catch {
         /* noop */
       }
-      ctx?.close().catch(() => undefined);
+      try {
+        ctx?.close().catch(() => undefined);
+      } catch {
+        /* noop */
+      }
       if (rawStreamRef.current === raw) rawStreamRef.current = null;
       if (sourceNodeRef.current === src) sourceNodeRef.current = null;
       if (rnnoiseNodeRef.current === rnnoise) rnnoiseNodeRef.current = null;
@@ -417,12 +421,14 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       });
       return true;
     } catch {
+      // Always release anything acquired before the failure (mic tracks,
+      // AudioContext, nodes) before reporting the error.
+      cleanup();
       if (cancelled()) {
-        cleanup();
         return false;
       }
       setError('マイクの取得に失敗しました。権限を確認してください。');
-      throw new Error('getUserMedia failed');
+      return false;
     } finally {
       setStarting(false);
     }
@@ -443,34 +449,29 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
     });
   }, []);
 
-  const join = useCallback(async () => {
-    if (inVcRef.current) return;
+  const join = useCallback(async (): Promise<boolean> => {
+    if (inVcRef.current) return true;
     const pending = startingPromiseRef.current;
     if (pending) {
       // A start is already waiting on getUserMedia; share it instead of
       // acquiring a second stream / AudioContext.
-      await pending;
-      return;
+      return pending;
     }
 
     startSessionRef.current += 1;
     const session = startSessionRef.current;
     const task = (async () => {
-      let ready = false;
-      try {
-        ready = await ensureMedia(session);
-      } catch {
-        return;
-      }
-      if (!ready || startSessionRef.current !== session) return;
+      const ready = await ensureMedia(session);
+      if (!ready || startSessionRef.current !== session) return false;
       setInVc(true);
       broadcastVcPeer(true);
       answerPending();
       startMeter();
+      return true;
     })();
     startingPromiseRef.current = task;
     try {
-      await task;
+      return await task;
     } finally {
       if (startingPromiseRef.current === task) startingPromiseRef.current = null;
     }
@@ -519,11 +520,16 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
     broadcastVcPeer(false);
   }, [stopMeter, broadcastVcPeer]);
 
-  const hostStart = useCallback(() => {
+  const hostStart = useCallback(async () => {
     if (!isHost) return;
     setVcActive(true);
-    void join();
-  }, [isHost, setVcActive, join]);
+    const started = await join();
+    if (!started) {
+      // The room must not stay LIVE when the local mic/setup failed.
+      setVcActive(false);
+      broadcastVcPeer(false);
+    }
+  }, [isHost, setVcActive, broadcastVcPeer, join]);
 
   const hostStop = useCallback(() => {
     if (!isHost) return;
