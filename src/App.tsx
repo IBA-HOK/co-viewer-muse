@@ -13,6 +13,7 @@ import BrowserPanel from './components/BrowserPanel';
 import DriveModePanel from './components/DriveModePanel';
 import VolumeMixerPanel from './components/VolumeMixerPanel';
 import { computeUnreadChatCount } from './chatUnread';
+import { scheduleResumeRetries, type ResumeRetryScheduler } from './playbackResume';
 import JoinModal from './components/JoinModal';
 import InviteQRModal from './components/InviteQRModal';
 import {
@@ -375,6 +376,44 @@ export default function App() {
   const hiddenAtRef = useRef(0);
   const bgPauseRef = useRef(false);
   const gestureResumeRef = useRef<(() => void) | null>(null);
+  const gestureResumeTimerRef = useRef<number | null>(null);
+  const resumeRetryRef = useRef<ResumeRetryScheduler | null>(null);
+
+  const clearGestureResume = useCallback(() => {
+    const gestureResume = gestureResumeRef.current;
+    if (gestureResume) {
+      gestureResumeRef.current = null;
+      try {
+        window.removeEventListener('pointerdown', gestureResume);
+        window.removeEventListener('touchend', gestureResume);
+      } catch {}
+    }
+    if (gestureResumeTimerRef.current !== null) {
+      window.clearTimeout(gestureResumeTimerRef.current);
+      gestureResumeTimerRef.current = null;
+    }
+  }, []);
+
+  const cancelResumeRetries = useCallback(() => {
+    resumeRetryRef.current?.cancel();
+    resumeRetryRef.current = null;
+  }, []);
+
+  // Once the room is paused, no pending tab-return retry may start playback.
+  useEffect(() => {
+    if (roomSync.isPlaying) return;
+    cancelResumeRetries();
+    clearGestureResume();
+    bgPauseRef.current = false;
+  }, [roomSync.isPlaying, cancelResumeRetries, clearGestureResume]);
+
+  useEffect(
+    () => () => {
+      cancelResumeRetries();
+      clearGestureResume();
+    },
+    [cancelResumeRetries, clearGestureResume]
+  );
 
   const isBackgroundPause = useCallback(() => {
     if (isDocumentHidden()) return true;
@@ -395,42 +434,55 @@ export default function App() {
       const rs = roomSyncRef.current;
       if (!ctrl || !rs) return;
       if (isDocumentHidden()) return;
-      const shouldPlay = rs.isPlaying || bgPauseRef.current;
-      if (shouldPlay && !ctrl.getIsPlaying?.()) {
-        [0, 150, 400, 900, 1800, 3000].forEach((d) => window.setTimeout(() => {
-          if (isDocumentHidden()) return;
-          try { ctrl.play(); } catch {}
-        }, d));
-        window.setTimeout(() => { bgPauseRef.current = false; }, 3500);
-        const gestureResume = () => {
-          const c = roomSyncRef.current?.controllerRef.current;
-          const r = roomSyncRef.current;
-          if (!c || !r) return;
-          if ((r.isPlaying || bgPauseRef.current) && !c.getIsPlaying?.()) {
-            try { c.play(); } catch {}
-          }
-        };
-        if (gestureResumeRef.current) {
-          try {
-            window.removeEventListener('pointerdown', gestureResumeRef.current);
-            window.removeEventListener('touchend', gestureResumeRef.current);
-          } catch {}
-        }
-        gestureResumeRef.current = gestureResume;
-        window.addEventListener('pointerdown', gestureResume, { once: true });
-        window.addEventListener('touchend', gestureResume, { once: true });
-        window.setTimeout(() => {
-          try {
-            if (gestureResumeRef.current === gestureResume) {
-              window.removeEventListener('pointerdown', gestureResume);
-              window.removeEventListener('touchend', gestureResume);
-              gestureResumeRef.current = null;
-            }
-          } catch {}
-        }, 10000);
-      } else if (shouldPlay) {
+
+      // A new visibility-return attempt supersedes any still-pending retries.
+      cancelResumeRetries();
+      clearGestureResume();
+
+      if (!rs.isPlaying) {
         bgPauseRef.current = false;
+        return;
       }
+      if (ctrl.getIsPlaying?.()) {
+        bgPauseRef.current = false;
+        return;
+      }
+
+      resumeRetryRef.current = scheduleResumeRetries({
+        isRoomPlaying: () => !!roomSyncRef.current?.isPlaying,
+        isPlayerPlaying: () => !!roomSyncRef.current?.controllerRef.current?.getIsPlaying?.(),
+        isDocumentHidden,
+        play: () => {
+          roomSyncRef.current?.controllerRef.current?.play();
+        },
+        onFinished: () => {
+          resumeRetryRef.current = null;
+          bgPauseRef.current = false;
+        },
+      });
+
+      const gestureResume = () => {
+        const c = roomSyncRef.current?.controllerRef.current;
+        const r = roomSyncRef.current;
+        if (!c || !r) return;
+        if (!r.isPlaying) {
+          clearGestureResume();
+          return;
+        }
+        if (!c.getIsPlaying?.()) {
+          try { c.play(); } catch {}
+          cancelResumeRetries();
+          clearGestureResume();
+        }
+      };
+      gestureResumeRef.current = gestureResume;
+      window.addEventListener('pointerdown', gestureResume, { once: true });
+      window.addEventListener('touchend', gestureResume, { once: true });
+      gestureResumeTimerRef.current = window.setTimeout(() => {
+        if (gestureResumeRef.current === gestureResume) {
+          clearGestureResume();
+        }
+      }, 10000);
     };
     const setupMediaSession = () => {
       const ctrl = roomSyncRef.current?.controllerRef.current;
@@ -517,8 +569,10 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('freeze' as unknown as string, onPageHide as EventListener);
       document.removeEventListener('resume' as unknown as string, onPageShow as EventListener);
+      cancelResumeRetries();
+      clearGestureResume();
     };
-  }, [isDocumentHidden]);
+  }, [isDocumentHidden, cancelResumeRetries, clearGestureResume]);
 
   return (
     <div className={activeView === CHAT_VIEW_INDEX ? 'flex h-dvh flex-col' : 'min-h-screen'}>
