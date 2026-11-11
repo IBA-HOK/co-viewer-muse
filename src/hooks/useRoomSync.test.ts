@@ -349,3 +349,85 @@ describe('useRoomSync · JOIN gesture playback', () => {
     expect(broadcast).not.toHaveBeenCalled();
   });
 });
+
+describe('useRoomSync · chat sequence', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps incrementing chatSeq after the chat array reaches 200 messages', () => {
+    const result = mountGuest(makeController());
+
+    act(() => {
+      for (let i = 1; i <= 201; i++) {
+        result.current.handleIncoming(
+          {
+            type: 'CHAT_MESSAGE',
+            peerId: 'peer-a',
+            name: 'Peer A',
+            text: `message ${i}`,
+            timestamp: i,
+            senderId: 'peer-a',
+          },
+          'peer-a'
+        );
+      }
+    });
+
+    expect(result.current.chat).toHaveLength(200);
+    expect(result.current.chatSeq).toBe(201);
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'CHAT_MESSAGE',
+          peerId: 'peer-a',
+          name: 'Peer A',
+          text: 'message 202',
+          timestamp: 202,
+          senderId: 'peer-a',
+        },
+        'peer-a'
+      );
+    });
+
+    expect(result.current.chat).toHaveLength(200);
+    expect(result.current.chatSeq).toBe(202);
+  });
+
+  it('increments chatSeq only once for a duplicate CHAT_MESSAGE id', () => {
+    const result = mountGuest(makeController());
+    const message = {
+      type: 'CHAT_MESSAGE' as const,
+      peerId: 'peer-a',
+      name: 'Peer A',
+      text: 'duplicate',
+      timestamp: 1,
+      senderId: 'peer-a',
+    };
+
+    act(() => {
+      result.current.handleIncoming(message, 'peer-a');
+      result.current.handleIncoming(message, 'peer-a');
+    });
+
+    expect(result.current.chat).toHaveLength(1);
+    expect(result.current.chatSeq).toBe(1);
+  });
+
+  it('increments chatSeq for locally sent chat messages', () => {
+    const result = mountGuest(makeController());
+
+    act(() => {
+      result.current.sendChat('hello');
+    });
+
+    expect(result.current.chat).toHaveLength(1);
+    expect(result.current.chatSeq).toBe(1);
+  });
+});

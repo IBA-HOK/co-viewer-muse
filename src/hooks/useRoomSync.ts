@@ -91,6 +91,8 @@ export interface UseRoomSyncResult {
   setDriveMode: (enabled: boolean) => void;
   setDriveAudioOnly: (audioOnly: boolean) => void;
   chat: ChatMessage[];
+  /** Monotonically increasing sequence of appended chat messages (trimming never decreases it). */
+  chatSeq: number;
   sendChat: (text: string) => void;
 }
 
@@ -165,7 +167,12 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const [vcPeers, setVcPeers] = useState<Set<string>>(new Set());
   const [driveMode, setDriveModeState] = useState(false);
   const [driveAudioOnly, setDriveAudioOnlyState] = useState(false);
-  const [chat, setChat] = useState<ChatMessage[]>([]);
+  const [chatState, setChatState] = useState<{ messages: ChatMessage[]; total: number }>({
+    messages: [],
+    total: 0,
+  });
+  const chat = chatState.messages;
+  const chatSeq = chatState.total;
 
   const titleFailedRef = useRef<Set<string>>(new Set());
   const titleRetryRef = useRef<Map<string, number>>(new Map());
@@ -802,13 +809,16 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           // senderId === peerId on this variant: skip echoes of own messages.
           if (msg.senderId === myId) break;
           const id = `${msg.peerId}-${msg.timestamp}`;
-          setChat((prev) => {
-            if (prev.some((m) => m.id === id)) return prev;
+          setChatState((prev) => {
+            if (prev.messages.some((m) => m.id === id)) return prev;
             const next = [
-              ...prev,
+              ...prev.messages,
               { id, peerId: msg.peerId, name: msg.name, text: msg.text, timestamp: msg.timestamp },
             ];
-            return next.length > 200 ? next.slice(next.length - 200) : next;
+            return {
+              messages: next.length > 200 ? next.slice(next.length - 200) : next,
+              total: prev.total + 1,
+            };
           });
           break;
         }
@@ -1217,12 +1227,15 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         timestamp,
         senderId: myId ?? '',
       });
-      setChat((prev) => {
+      setChatState((prev) => {
         const next = [
-          ...prev,
+          ...prev.messages,
           { id, peerId: myId ?? '', name: myNameRef.current, text: trimmed, timestamp },
         ];
-        return next.length > 200 ? next.slice(next.length - 200) : next;
+        return {
+          messages: next.length > 200 ? next.slice(next.length - 200) : next,
+          total: prev.total + 1,
+        };
       });
     },
     [broadcast, myId]
@@ -1426,6 +1439,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     setDriveMode,
     setDriveAudioOnly,
     chat,
+    chatSeq,
     sendChat,
   };
 }

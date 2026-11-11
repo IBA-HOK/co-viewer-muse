@@ -12,6 +12,7 @@ import VoiceChatPanel from './components/VoiceChatPanel';
 import BrowserPanel from './components/BrowserPanel';
 import DriveModePanel from './components/DriveModePanel';
 import VolumeMixerPanel from './components/VolumeMixerPanel';
+import { computeUnreadChatCount } from './chatUnread';
 import JoinModal from './components/JoinModal';
 import InviteQRModal from './components/InviteQRModal';
 import {
@@ -102,7 +103,7 @@ export default function App() {
       return 0;
     }
   });
-  const [lastSeenChat, setLastSeenChat] = useState(0);
+  const [lastSeenChatSeq, setLastSeenChatSeq] = useState(0);
   const viewSwipeStartX = useRef<number | null>(null);
   const viewSwipeStartY = useRef<number | null>(null);
 
@@ -172,12 +173,16 @@ export default function App() {
   });
   roomSyncRef.current = roomSync;
 
-  const chatCount = roomSync.chat.length;
-  const unreadCount = activeView === CHAT_VIEW_INDEX ? 0 : Math.max(0, chatCount - lastSeenChat);
+  const chatSeq = roomSync.chatSeq;
+  const unreadCount = computeUnreadChatCount(
+    chatSeq,
+    lastSeenChatSeq,
+    activeView === CHAT_VIEW_INDEX
+  );
 
   useEffect(() => {
-    if (activeView === CHAT_VIEW_INDEX) setLastSeenChat(chatCount);
-  }, [activeView, chatCount]);
+    if (activeView === CHAT_VIEW_INDEX) setLastSeenChatSeq(chatSeq);
+  }, [activeView, chatSeq]);
 
   const [viewDir, setViewDir] = useState<1 | -1>(1);
 
