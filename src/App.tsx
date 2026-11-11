@@ -266,7 +266,15 @@ export default function App() {
   }, [inviteUrl]);
 
   const handleJoinConfirm = useCallback(() => {
-    roomSync.controllerRef.current?.play();
+    if (roomSync.hasReceivedRoomState && !roomSync.isPlaying) {
+      // The room is known to be paused: do not start playback just because the
+      // JOIN click unlocked autoplay.
+      roomSync.controllerRef.current?.pause();
+    } else {
+      // Unknown state (still connecting) or a playing room: use the gesture to
+      // start playback, but suppress the resulting local PLAY broadcast.
+      roomSync.playForGesture();
+    }
     setJoined(true);
   }, [roomSync]);
 

@@ -42,6 +42,14 @@ export interface UseRoomSyncResult {
   queue: QueueItem[];
   currentId: string | null;
   isPlaying: boolean;
+  /**
+   * True once a STATE_SNAPSHOT or SYNC_PING has been applied. Before that the
+   * room state is unknown, so JOIN may still use its user gesture to start
+   * playback in order to satisfy the browser autoplay policy.
+   */
+  hasReceivedRoomState: boolean;
+  /** Play as part of a user gesture without re-broadcasting a PLAY command. */
+  playForGesture: () => void;
   currentTime: number;
   /**
    * 0 = automatic drift correction is running normally. 1..n = fallback hold
@@ -150,6 +158,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [hasReceivedRoomState, setHasReceivedRoomState] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [titles, setTitles] = useState<Record<string, string>>({});
   const [vcActive, setVcActiveState] = useState(false);
@@ -184,6 +193,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     null
   );
   const isPlayingRef = useRef(false);
+  const hasReceivedRoomStateRef = useRef(false);
   const currentTimeRef = useRef(0);
   const endAdvanceRef = useRef<string | null>(null);
   const goNextRef = useRef<() => void>(() => {});
@@ -355,6 +365,25 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       }, 400);
     }
   }, []);
+
+  const markRoomStateReceived = useCallback(() => {
+    if (hasReceivedRoomStateRef.current) return;
+    hasReceivedRoomStateRef.current = true;
+    setHasReceivedRoomState(true);
+  }, []);
+
+  /**
+   * Start playback from the JOIN click (a user gesture) without treating it as
+   * a local playback command that must be broadcast. If the room state is
+   * already known to be paused, keep it paused instead of starting playback.
+   */
+  const playForGesture = useCallback(() => {
+    if (hasReceivedRoomStateRef.current && !isPlayingRef.current) {
+      applyRemote(() => controllerRef.current?.pause());
+      return;
+    }
+    applyRemote(() => controllerRef.current?.play());
+  }, [applyRemote]);
 
   /**
    * Feed a host ping into the discontinuity detector. Returns true when the
@@ -574,6 +603,8 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         }
         case 'SYNC_PING': {
+          markRoomStateReceived();
+          isPlayingRef.current = msg.isPlaying;
           if (driveModeRef.current && !isHost) break;
           const pingAt = Date.now();
           if (!isHost && msg.senderId !== myId) {
@@ -707,10 +738,12 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         }
         case 'STATE_SNAPSHOT': {
+          markRoomStateReceived();
           setQueue(msg.queue);
           setCurrentId(msg.currentId);
           setCurrentTime(msg.currentTime);
           setIsPlaying(msg.isPlaying);
+          isPlayingRef.current = msg.isPlaying;
           if (driveModeRef.current && !isHost) break;
           if (!isHost) {
             remoteClockRef.current = {
@@ -799,7 +832,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         broadcast(msg);
       }
     },
-    [applyRemote, broadcast, clearResyncPending, isHost, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendTo]
+    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendTo]
   );
 
   const reportLocalEvent = useCallback(
@@ -1363,6 +1396,8 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     queue,
     currentId,
     isPlaying,
+    hasReceivedRoomState,
+    playForGesture,
     currentTime,
     syncFallbackLevel,
     syncResyncing,

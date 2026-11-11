@@ -210,3 +210,142 @@ describe('useRoomSync · queue item switch starts at zero', () => {
     expect(controller.play).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('useRoomSync · JOIN gesture playback', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mountGuestWithBroadcast(controller: PlayerController) {
+    const broadcast = vi.fn();
+    const { result } = renderHook(() =>
+      useRoomSync({
+        isHost: false,
+        myId: 'guest-1',
+        connected: true,
+        myName: 'Guest',
+        broadcast,
+        sendTo: vi.fn(),
+      })
+    );
+    result.current.controllerRef.current = controller;
+    return { result, broadcast };
+  }
+
+  it('plays before any room state arrives and suppresses the local sync', () => {
+    const controller = makeController();
+    const { result } = mountGuestWithBroadcast(controller);
+
+    expect(result.current.hasReceivedRoomState).toBe(false);
+
+    act(() => {
+      result.current.playForGesture();
+    });
+
+    expect(controller.play).toHaveBeenCalledTimes(1);
+    expect(controller.pause).not.toHaveBeenCalled();
+    expect(result.current.isRemoteSyncingRef.current).toBe(true);
+  });
+
+  it('marks the room state as received on STATE_SNAPSHOT', () => {
+    const controller = makeController();
+    const { result } = mountGuestWithBroadcast(controller);
+
+    act(() => {
+      result.current.handleIncoming(snapshot(false), 'host-1');
+    });
+
+    expect(result.current.hasReceivedRoomState).toBe(true);
+  });
+
+  it('marks the room state as received on SYNC_PING', () => {
+    const controller = makeController();
+    const { result } = mountGuestWithBroadcast(controller);
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'SYNC_PING',
+          currentTime: 10,
+          isPlaying: false,
+          sentAt: Date.now(),
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+
+    expect(result.current.hasReceivedRoomState).toBe(true);
+  });
+
+  it('does not start playback after a paused snapshot', () => {
+    const controller = makeController();
+    const { result, broadcast } = mountGuestWithBroadcast(controller);
+
+    act(() => {
+      result.current.handleIncoming(snapshot(false), 'host-1');
+    });
+    vi.mocked(controller.play).mockClear();
+    vi.mocked(controller.pause).mockClear();
+    broadcast.mockClear();
+
+    act(() => {
+      result.current.playForGesture();
+    });
+
+    expect(controller.play).not.toHaveBeenCalled();
+    expect(controller.pause).toHaveBeenCalledTimes(1);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it('still starts playback after a playing snapshot', () => {
+    const controller = makeController();
+    const { result, broadcast } = mountGuestWithBroadcast(controller);
+
+    act(() => {
+      result.current.handleIncoming(snapshot(true), 'host-1');
+    });
+    vi.mocked(controller.play).mockClear();
+    broadcast.mockClear();
+
+    act(() => {
+      result.current.playForGesture();
+    });
+
+    expect(controller.play).toHaveBeenCalledTimes(1);
+    expect(controller.pause).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it('does not broadcast PLAY for a Controller when the room is paused', () => {
+    const controller = makeController();
+    const { result, broadcast } = mountGuestWithBroadcast(controller);
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'PARTICIPANTS',
+          participants: [
+            { peerId: 'guest-1', name: 'Guest', isHost: false, role: 'Controller' },
+          ],
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+      result.current.handleIncoming(snapshot(false), 'host-1');
+    });
+    broadcast.mockClear();
+
+    act(() => {
+      result.current.playForGesture();
+    });
+
+    expect(controller.play).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+});
