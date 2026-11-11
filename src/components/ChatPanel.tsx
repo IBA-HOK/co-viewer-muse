@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 
 export interface ChatMessage {
   id: string;
@@ -27,20 +27,27 @@ function formatTime(ts: number): string {
 export default function ChatPanel({ messages, myId, onSend, fillViewport }: ChatPanelProps) {
   const [draft, setDraft] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = listRef.current;
     if (!el) return;
-    const maxScrollTop = el.scrollHeight - el.clientHeight;
-    const nearBottom = maxScrollTop - el.scrollTop < AUTO_SCROLL_THRESHOLD;
-    if (nearBottom) {
+    if (stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages]);
 
+  const handleScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD;
+  };
+
   const handleSend = () => {
     const text = draft.trim();
     if (!text) return;
+    stickToBottomRef.current = true;
     onSend(text);
     setDraft('');
   };
@@ -56,6 +63,7 @@ export default function ChatPanel({ messages, myId, onSend, fillViewport }: Chat
     <div className={fillViewport ? 'flex min-h-0 w-full flex-1 flex-col space-y-2 p-3 pb-4' : 'flex min-h-[68vh] w-full flex-col space-y-2'}>
       <div
         ref={listRef}
+        onScroll={handleScroll}
         className={fillViewport ? 'min-h-0 flex-1 space-y-2 overflow-y-auto pr-1' : 'min-h-[30vh] max-h-[62vh] flex-1 space-y-2 overflow-y-auto pr-1'}
       >
         {messages.length === 0 && (

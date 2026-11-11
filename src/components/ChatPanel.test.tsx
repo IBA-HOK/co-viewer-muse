@@ -7,6 +7,25 @@ const msgs = [
   { id: 'b-1', peerId: 'me', name: 'ME', text: 'hi there', timestamp: Date.now() },
 ];
 
+const longMsg = {
+  id: 'a-2',
+  peerId: 'peer-a',
+  name: 'ALICE',
+  text: 'a long message '.repeat(20),
+  timestamp: Date.now(),
+};
+
+function setScrollMetrics(el: HTMLElement, scrollHeight: number, clientHeight: number) {
+  Object.defineProperty(el, 'scrollHeight', { configurable: true, value: scrollHeight });
+  Object.defineProperty(el, 'clientHeight', { configurable: true, value: clientHeight });
+}
+
+function getList(container: HTMLElement): HTMLElement {
+  const list = container.querySelector('div.overflow-y-auto');
+  expect(list).toBeTruthy();
+  return list as HTMLElement;
+}
+
 describe('ChatPanel', () => {
   it('renders Messenger bubbles with own/other alignment, no expand step', () => {
     render(<ChatPanel messages={msgs} myId="me" onSend={() => {}} />);
@@ -37,6 +56,64 @@ describe('ChatPanel', () => {
   it('shows empty state when no messages', () => {
     render(<ChatPanel messages={[]} myId="me" onSend={() => {}} />);
     expect(screen.getByText('NO MESSAGES YET')).toBeTruthy();
+  });
+
+  it('auto-scrolls on a tall new message when already at the bottom', () => {
+    const { container, rerender } = render(
+      <ChatPanel messages={msgs} myId="me" onSend={() => {}} />,
+    );
+    const list = getList(container);
+    setScrollMetrics(list, 600, 300);
+    list.scrollTop = 300;
+    fireEvent.scroll(list);
+
+    setScrollMetrics(list, 900, 300);
+    rerender(<ChatPanel messages={[...msgs, longMsg]} myId="me" onSend={() => {}} />);
+
+    expect(list.scrollTop).toBe(900);
+  });
+
+  it('does not auto-scroll on a new message when scrolled up', () => {
+    const { container, rerender } = render(
+      <ChatPanel messages={msgs} myId="me" onSend={() => {}} />,
+    );
+    const list = getList(container);
+    setScrollMetrics(list, 600, 300);
+    list.scrollTop = 50;
+    fireEvent.scroll(list);
+
+    setScrollMetrics(list, 900, 300);
+    rerender(<ChatPanel messages={[...msgs, longMsg]} myId="me" onSend={() => {}} />);
+
+    expect(list.scrollTop).toBe(50);
+  });
+
+  it('scrolls to the bottom after sending an own message', () => {
+    const onSend = vi.fn();
+    const { container, rerender } = render(
+      <ChatPanel messages={msgs} myId="me" onSend={onSend} />,
+    );
+    const list = getList(container);
+    setScrollMetrics(list, 600, 300);
+    list.scrollTop = 50;
+    fireEvent.scroll(list);
+
+    const input = screen.getByPlaceholderText('MESSAGE...');
+    fireEvent.change(input, { target: { value: 'new own message' } });
+    fireEvent.click(screen.getByText('SEND'));
+    expect(onSend).toHaveBeenCalledWith('new own message');
+
+    const ownMsg = {
+      id: 'me-2',
+      peerId: 'me',
+      name: 'ME',
+      text: 'new own message',
+      timestamp: Date.now(),
+    };
+    setScrollMetrics(list, 900, 300);
+    rerender(<ChatPanel messages={[...msgs, ownMsg]} myId="me" onSend={onSend} />);
+
+    expect(list.scrollTop).toBe(900);
   });
 
   it('sends via SEND button and Enter, ignores empty input', () => {
