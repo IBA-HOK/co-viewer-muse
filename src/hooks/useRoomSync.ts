@@ -918,14 +918,18 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (!driveModeRef.current || isHost) {
         applyRemote(() => {
           controllerRef.current?.loadMedia(it.videoId);
+          // `getCurrentTime()` may still report the previous video right after
+          // loadMedia(), so restart explicitly instead of broadcasting it.
+          controllerRef.current?.seekTo(0);
           controllerRef.current?.play();
         });
+        setCurrentTime(0);
       }
       broadcast({
         type: 'QUEUE_UPDATE',
         queue: queueRef.current,
         currentId: id,
-        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+        currentTime: 0,
         senderId: myId ?? '',
       });
       if (isHost) emitSyncPing();
@@ -959,6 +963,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (idx < 0) return;
       const nextQueue = queueRef.current.filter((q) => q.id !== id);
       let nextCurrentId = currentIdRef.current;
+      let nextCurrentTime = controllerRef.current?.getCurrentTime() ?? 0;
       if (currentIdRef.current === id) {
         const replacement = nextQueue[idx - 1] ?? nextQueue[idx] ?? null;
         nextCurrentId = replacement ? replacement.id : null;
@@ -966,8 +971,13 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         if (replacement && (!driveModeRef.current || isHost)) {
           applyRemote(() => {
             controllerRef.current?.loadMedia(replacement.videoId);
+            // The old playhead can still be reported right after loadMedia();
+            // the replacement must start from the beginning.
+            controllerRef.current?.seekTo(0);
             controllerRef.current?.play();
           });
+          setCurrentTime(0);
+          nextCurrentTime = 0;
         } else if (!replacement && (!driveModeRef.current || isHost)) {
           applyRemote(() => controllerRef.current?.pause());
         }
@@ -978,7 +988,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         type: 'QUEUE_UPDATE',
         queue: nextQueue,
         currentId: nextCurrentId,
-        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
+        currentTime: nextCurrentTime,
         senderId: myId ?? '',
       });
       if (isHost) emitSyncPing();
