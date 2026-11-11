@@ -737,24 +737,31 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           setQueue(msg.queue);
           const changed = msg.currentId !== currentIdRef.current;
           setCurrentId(msg.currentId);
-          if (changed && !(driveModeRef.current && !isHost)) {
+          if (changed) {
             const it = msg.queue.find((q) => q.id === msg.currentId);
             if (it) {
-              if (!isHost) {
-                remoteClockRef.current = {
-                  time: msg.currentTime,
-                  isPlaying: remoteClockRef.current?.isPlaying ?? true,
-                  at: Date.now(),
-                };
+              // The new item is playing for the room. Drive-mode guests do not
+              // operate their player, but their state must still reflect it.
+              setIsPlaying(true);
+              if (!(driveModeRef.current && !isHost)) {
+                if (!isHost) {
+                  remoteClockRef.current = {
+                    time: msg.currentTime,
+                    isPlaying: remoteClockRef.current?.isPlaying ?? true,
+                    at: Date.now(),
+                  };
+                }
+                // New media: forget the old item's fallback history and keep
+                // automatic corrections away while it loads.
+                resetDriftGuard(true);
+                applyRemote(() => {
+                  controllerRef.current?.loadMedia(it.videoId);
+                  controllerRef.current?.seekTo(msg.currentTime);
+                  controllerRef.current?.play();
+                });
               }
-              // New media: forget the old item's fallback history and keep
-              // automatic corrections away while it loads.
-              resetDriftGuard(true);
-              applyRemote(() => {
-                controllerRef.current?.loadMedia(it.videoId);
-                controllerRef.current?.seekTo(msg.currentTime);
-                controllerRef.current?.play();
-              });
+            } else {
+              setIsPlaying(false);
             }
           }
           break;
@@ -995,6 +1002,8 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           controllerRef.current?.seekTo(0);
           controllerRef.current?.play();
         });
+        setIsPlaying(true);
+        isPlayingRef.current = true;
         setCurrentTime(0);
       }
       broadcast({
@@ -1048,10 +1057,12 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             controllerRef.current?.seekTo(0);
             controllerRef.current?.play();
           });
+          setIsPlaying(true);
           setCurrentTime(0);
           nextCurrentTime = 0;
         } else if (!replacement && (!driveModeRef.current || isHost)) {
           applyRemote(() => controllerRef.current?.pause());
+          setIsPlaying(false);
         }
       }
       setQueue(nextQueue);
