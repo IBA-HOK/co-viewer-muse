@@ -658,6 +658,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             // A correction is starting; the tolerated-lag notice is transient.
             setSyncToleranceLag(0);
             setCurrentTime(msg.currentTime);
+            setIsPlaying(msg.isPlaying);
             applyRemote(() => {
               controller.seekTo(msg.currentTime);
               if (msg.isPlaying) controller.play();
