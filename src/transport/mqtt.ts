@@ -43,6 +43,22 @@ function isSyncMessage(value: unknown): value is SyncMessage {
   );
 }
 
+interface PresenceMessage {
+  peerId: string;
+  name?: string;
+  online: boolean;
+}
+
+function isPresenceMessage(value: unknown): value is PresenceMessage {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as { peerId?: unknown; name?: unknown; online?: unknown };
+  return (
+    typeof candidate.peerId === 'string' &&
+    (candidate.name === undefined || typeof candidate.name === 'string') &&
+    typeof candidate.online === 'boolean'
+  );
+}
+
 /**
  * MQTT WSS transport adapter.
  * Mirrors usePeer surface; sync travels over mqtt.js, voice stays PeerJS (no-op here).
@@ -170,11 +186,34 @@ export function useMqttTransport(opts: TransportOptions): Transport {
       }
     };
 
+    const handlePresence = (parsed: unknown) => {
+      if (!isPresenceMessage(parsed)) return;
+      if (parsed.peerId === myIdRef.current) return;
+
+      if (isHostRef.current) {
+        if (parsed.online) {
+          cbRef.current.onGuestConnected(parsed.peerId, parsed.name ?? 'Guest');
+        } else {
+          cbRef.current.onGuestDisconnected(parsed.peerId);
+        }
+        return;
+      }
+
+      // Guests rely on the host's PARTICIPANTS updates for other guests; only
+      // the host going offline (or its clean shutdown) matters here.
+      if (!parsed.online && parsed.peerId === roomIdRef.current) {
+        cbRef.current.onHostDisconnected();
+      }
+    };
+
     const handleMessage = (topic: string, payload: Uint8Array | Buffer) => {
-      void topic;
       try {
         const raw = payload.toString();
         const parsed: unknown = JSON.parse(raw);
+        if (topic === presenceTopic(rid)) {
+          handlePresence(parsed);
+          return;
+        }
         if (!isSyncMessage(parsed)) return;
         if (parsed.senderId === myIdRef.current) return;
         cbRef.current.onMessage(parsed, parsed.senderId ?? 'unknown');
@@ -183,7 +222,12 @@ export function useMqttTransport(opts: TransportOptions): Transport {
       }
     };
 
-    const handleClose = () => setConnected(false);
+    const handleClose = () => {
+      setConnected(false);
+      if (!isHostRef.current) {
+        cbRef.current.onHostDisconnected();
+      }
+    };
 
     client.on('connect', handleConnect);
     client.on('message', handleMessage);
@@ -198,6 +242,15 @@ export function useMqttTransport(opts: TransportOptions): Transport {
         client.removeListener('close', handleClose);
         client.removeListener('offline', handleClose);
         client.removeListener('error', handleClose);
+      } catch {
+        /* noop */
+      }
+      try {
+        const presencePayload = JSON.stringify({
+          peerId: myIdRef.current,
+          online: false,
+        });
+        client.publish(presenceTopic(rid), presencePayload, { qos: 1, retain: false });
       } catch {
         /* noop */
       }
