@@ -592,6 +592,7 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       call.on('error', () => {
         connectionsRef.current.delete(call.peer);
         answeredRef.current.delete(call.peer);
+        removeRemoteStream(call.peer);
       });
       if (
         inVcRef.current &&
@@ -661,6 +662,7 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
           call.on('error', () => {
             conns.delete(peerId);
             answeredRef.current.delete(peerId);
+            removeRemoteStream(peerId);
           });
           conns.set(peerId, call);
         }
