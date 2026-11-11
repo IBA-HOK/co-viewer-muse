@@ -113,7 +113,7 @@ export default function VoiceChatPanel({
         <>
           {isHost ? (
             !vcActive ? (
-              <button type="button" className={`${btnBase} ${primary}`} onClick={hostStart}>
+              <button type="button" className={`${btnBase} ${primary}`} onClick={hostStart} disabled={starting}>
                 ▶ START VC
               </button>
             ) : (
@@ -145,7 +145,7 @@ export default function VoiceChatPanel({
               WAITING FOR HOST
             </p>
           ) : !inVc ? (
-            <button type="button" className={`${btnBase} ${primary}`} onClick={guestJoin}>
+            <button type="button" className={`${btnBase} ${primary}`} onClick={guestJoin} disabled={starting}>
               ▶ JOIN VC
             </button>
           ) : (

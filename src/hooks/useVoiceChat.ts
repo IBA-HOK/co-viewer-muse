@@ -103,6 +103,10 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const answeredRef = useRef<Set<string>>(new Set());
   const meterTimerRef = useRef<number | undefined>(undefined);
+  /** Serializes concurrent start attempts so getUserMedia/AudioContext are created once. */
+  const startingPromiseRef = useRef<Promise<void> | null>(null);
+  /** Incremented per start attempt and on leave/hostStop to cancel a pending start. */
+  const startSessionRef = useRef(0);
 
   // Mirror state into refs for use inside stable (long-lived) callbacks.
   const inVcRef = useRef(false);
@@ -267,23 +271,84 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
     setLocalLevel(0);
   }, []);
 
-  const ensureMedia = useCallback(async () => {
-    if (localStreamRef.current) return;
+  const ensureMedia = useCallback(async (session: number): Promise<boolean> => {
+    if (localStreamRef.current) return true;
     setStarting(true);
     setError(null);
+
+    let raw: MediaStream | null = null;
+    let ctx: AudioContext | null = null;
+    let src: MediaStreamAudioSourceNode | null = null;
+    let dest: MediaStreamAudioDestinationNode | null = null;
+    let localAnalyser: AnalyserNode | null = null;
+    let master: GainNode | null = null;
+    let rnnoise: RnnoiseWorkletNode | null = null;
+
+    const cancelled = () => startSessionRef.current !== session;
+
+    const cleanup = () => {
+      raw?.getTracks().forEach((t) => t.stop());
+      try {
+        src?.disconnect();
+      } catch {
+        /* noop */
+      }
+      try {
+        rnnoise?.disconnect();
+      } catch {
+        /* noop */
+      }
+      try {
+        dest?.disconnect();
+      } catch {
+        /* noop */
+      }
+      try {
+        localAnalyser?.disconnect();
+      } catch {
+        /* noop */
+      }
+      try {
+        master?.disconnect();
+      } catch {
+        /* noop */
+      }
+      ctx?.close().catch(() => undefined);
+      if (rawStreamRef.current === raw) rawStreamRef.current = null;
+      if (sourceNodeRef.current === src) sourceNodeRef.current = null;
+      if (rnnoiseNodeRef.current === rnnoise) rnnoiseNodeRef.current = null;
+      if (destinationRef.current === dest) destinationRef.current = null;
+      if (localAnalyserRef.current === localAnalyser) localAnalyserRef.current = null;
+      if (masterGainRef.current === master) masterGainRef.current = null;
+      if (audioCtxRef.current === ctx) audioCtxRef.current = null;
+      if (localStreamRef.current === raw || localStreamRef.current === dest?.stream) {
+        localStreamRef.current = null;
+      }
+    };
+
     try {
-      const raw = await navigator.mediaDevices.getUserMedia({
+      raw = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true },
         video: false,
       });
+      // A stop/leave may have happened while the permission prompt was open.
+      if (cancelled()) {
+        cleanup();
+        return false;
+      }
       rawStreamRef.current = raw;
 
       const useRawSend = isIOSDevice();
 
-      const ctx = new AudioContext();
-      await ctx.resume();
+      ctx = new AudioContext();
       audioCtxRef.current = ctx;
-      const master = ctx.createGain();
+      await ctx.resume();
+      if (cancelled()) {
+        cleanup();
+        return false;
+      }
+
+      master = ctx.createGain();
       try {
         const saved = localStorage.getItem('co-viewer:mixer');
         if (saved) {
@@ -294,12 +359,12 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       master.connect(ctx.destination);
       masterGainRef.current = master;
 
-      const src = ctx.createMediaStreamSource(raw);
+      src = ctx.createMediaStreamSource(raw);
       sourceNodeRef.current = src;
-      const dest = ctx.createMediaStreamDestination();
+      dest = ctx.createMediaStreamDestination();
       destinationRef.current = dest;
 
-      const localAnalyser = ctx.createAnalyser();
+      localAnalyser = ctx.createAnalyser();
       localAnalyser.fftSize = 256;
       src.connect(localAnalyser);
       localAnalyserRef.current = localAnalyser;
@@ -316,13 +381,23 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
         let hasRn = false;
         try {
           const wasm = await loadRnnoise({ url: rnnoiseWasmUrl, simdUrl: rnnoiseSimdWasmUrl });
+          if (cancelled()) {
+            cleanup();
+            return false;
+          }
           await ctx.audioWorklet.addModule(rnnoiseWorkletUrl);
-          rnnoiseNodeRef.current = new RnnoiseWorkletNode(ctx, {
+          if (cancelled()) {
+            cleanup();
+            return false;
+          }
+          rnnoise = new RnnoiseWorkletNode(ctx, {
             wasmBinary: wasm,
             maxChannels: 2,
           });
+          rnnoiseNodeRef.current = rnnoise;
           hasRn = true;
         } catch {
+          rnnoise = null;
           rnnoiseNodeRef.current = null;
           hasRn = false;
         }
@@ -340,7 +415,12 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       raw.getAudioTracks().forEach((t) => {
         t.enabled = !mutedRef.current;
       });
+      return true;
     } catch {
+      if (cancelled()) {
+        cleanup();
+        return false;
+      }
       setError('マイクの取得に失敗しました。権限を確認してください。');
       throw new Error('getUserMedia failed');
     } finally {
@@ -365,18 +445,40 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
 
   const join = useCallback(async () => {
     if (inVcRef.current) return;
-    try {
-      await ensureMedia();
-    } catch {
+    const pending = startingPromiseRef.current;
+    if (pending) {
+      // A start is already waiting on getUserMedia; share it instead of
+      // acquiring a second stream / AudioContext.
+      await pending;
       return;
     }
-    setInVc(true);
-    broadcastVcPeer(true);
-    answerPending();
-    startMeter();
+
+    startSessionRef.current += 1;
+    const session = startSessionRef.current;
+    const task = (async () => {
+      let ready = false;
+      try {
+        ready = await ensureMedia(session);
+      } catch {
+        return;
+      }
+      if (!ready || startSessionRef.current !== session) return;
+      setInVc(true);
+      broadcastVcPeer(true);
+      answerPending();
+      startMeter();
+    })();
+    startingPromiseRef.current = task;
+    try {
+      await task;
+    } finally {
+      if (startingPromiseRef.current === task) startingPromiseRef.current = null;
+    }
   }, [ensureMedia, broadcastVcPeer, answerPending, startMeter]);
 
   const leave = useCallback(() => {
+    // Invalidate any in-flight start so it cannot revive the VC after this stop.
+    startSessionRef.current += 1;
     stopMeter();
     connectionsRef.current.forEach((call) => call.close());
     connectionsRef.current.clear();
