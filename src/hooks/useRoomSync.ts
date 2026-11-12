@@ -589,6 +589,43 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     });
   }, [broadcast, myId]);
 
+  /**
+   * Replay the host's current room state directly to one peer. Used both for
+   * a fresh JOIN and for a guest's REQUEST_STATE after the connection is
+   * restored, where no PARTICIPANTS broadcast is produced for the same peerId.
+   */
+  const sendRoomStateTo = useCallback(
+    (peerId: string, list: Participant[] = participantsRef.current) => {
+      sendTo(peerId, {
+        type: 'PARTICIPANTS',
+        participants: dedupeParticipants(list),
+        senderId: myId ?? '',
+      });
+      sendTo(peerId, {
+        type: 'DRIVE_MODE',
+        enabled: driveModeRef.current,
+        audioOnly: driveAudioOnlyRef.current,
+        senderId: myId ?? '',
+      });
+      sendTo(peerId, {
+        type: 'VC_STATE',
+        active: vcActiveRef.current,
+        senderId: myId ?? '',
+      });
+      if (vcActiveRef.current) {
+        for (const id of vcPeersRef.current) {
+          sendTo(peerId, {
+            type: 'VC_PEER',
+            peerId: id,
+            inVc: true,
+            senderId: myId ?? '',
+          });
+        }
+      }
+    },
+    [myId, sendTo]
+  );
+
   const handleIncoming = useCallback(
     (msg: SyncMessage, fromPeerId: string) => {
       const senderId = myId ?? '';
@@ -750,6 +787,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         }
         case 'REQUEST_STATE': {
           if (!isHost) break;
+          // A reconnecting guest keeps the same peerId, so onGuestJoined's
+          // dedupe skips it and no PARTICIPANTS broadcast reaches it. Replay
+          // the room state directly so the guest recovers the full list, VC
+          // and drive mode without waiting for the next membership change.
+          sendRoomStateTo(msg.senderId);
           if (currentMediaRef.current) {
             sendTo(msg.senderId, {
               type: 'STATE_SNAPSHOT',
@@ -945,7 +987,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         broadcast(msg);
       }
     },
-    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendTo, setPlayingState]
+    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendRoomStateTo, sendTo, setPlayingState]
   );
 
   const reportLocalEvent = useCallback(
@@ -1230,29 +1272,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       ]);
       setParticipants(updated);
       broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
-      sendTo(peerId, {
-        type: 'DRIVE_MODE',
-        enabled: driveModeRef.current,
-        audioOnly: driveAudioOnlyRef.current,
-        senderId: myId ?? '',
-      });
-      // The initial VC_STATE broadcast happened before this guest joined, so
-      // replay the current VC state directly to them.
-      sendTo(peerId, {
-        type: 'VC_STATE',
-        active: vcActiveRef.current,
-        senderId: myId ?? '',
-      });
-      if (vcActiveRef.current) {
-        for (const id of vcPeersRef.current) {
-          sendTo(peerId, {
-            type: 'VC_PEER',
-            peerId: id,
-            inVc: true,
-            senderId: myId ?? '',
-          });
-        }
-      }
+      sendRoomStateTo(peerId, updated);
       if (currentMediaRef.current) {
         sendTo(peerId, {
           type: 'STATE_SNAPSHOT',
@@ -1274,7 +1294,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         });
       }
     },
-    [broadcast, isHost, myId, sendTo]
+    [broadcast, isHost, myId, sendRoomStateTo, sendTo]
   );
 
   const onGuestLeft = useCallback(

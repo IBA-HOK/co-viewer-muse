@@ -51,6 +51,7 @@ function mountGuest(controller: PlayerController) {
 
 function mountHost(controller: PlayerController) {
   const broadcast = vi.fn();
+  const sendTo = vi.fn();
   const { result } = renderHook(() =>
     useRoomSync({
       isHost: true,
@@ -58,11 +59,11 @@ function mountHost(controller: PlayerController) {
       connected: true,
       myName: 'Host',
       broadcast,
-      sendTo: vi.fn(),
+      sendTo,
     })
   );
   result.current.controllerRef.current = controller;
-  return { result, broadcast };
+  return { result, broadcast, sendTo };
 }
 
 function seedQueue(
@@ -947,5 +948,129 @@ describe('useRoomSync · NAME_UPDATE controller memory migration', () => {
     expect(broadcast).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'PARTICIPANTS' })
     );
+  });
+});
+
+
+describe('useRoomSync · REQUEST_STATE reconnect recovery', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function messagesTo(sendTo: ReturnType<typeof vi.fn>, peerId: string): SyncMessage[] {
+    return sendTo.mock.calls
+      .filter((call) => call[0] === peerId)
+      .map((call) => call[1] as SyncMessage);
+  }
+
+  it('replays the full participants list even without currentMedia', () => {
+    const { result, broadcast, sendTo } = mountHost(makeController());
+    act(() => {
+      result.current.onGuestJoined('peer-a', 'Alice');
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-b', 'Bob');
+    });
+    sendTo.mockClear();
+    broadcast.mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'REQUEST_STATE', senderId: 'peer-a' },
+        'peer-a'
+      );
+    });
+
+    const messages = messagesTo(sendTo, 'peer-a');
+    const participantsMsg = messages.find((m) => m.type === 'PARTICIPANTS');
+    expect(participantsMsg?.type).toBe('PARTICIPANTS');
+    if (participantsMsg?.type !== 'PARTICIPANTS') throw new Error('unreachable');
+    expect(participantsMsg.participants).toHaveLength(3);
+    expect(participantsMsg.participants.map((p) => p.peerId).sort()).toEqual([
+      'host-1',
+      'peer-a',
+      'peer-b',
+    ]);
+    expect(messages.some((m) => m.type === 'STATE_SNAPSHOT')).toBe(false);
+    expect(messages.some((m) => m.type === 'QUEUE_UPDATE')).toBe(false);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it('replays drive mode and VC state to the requesting guest', () => {
+    const { result, sendTo } = mountHost(makeController());
+    act(() => {
+      result.current.onGuestJoined('peer-a', 'Alice');
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-b', 'Bob');
+    });
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'VC_PEER', peerId: 'peer-b', inVc: true, senderId: 'peer-b' },
+        'peer-b'
+      );
+    });
+    act(() => {
+      result.current.setVcActive(true);
+      result.current.setDriveMode(true);
+      result.current.setDriveAudioOnly(true);
+    });
+    sendTo.mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'REQUEST_STATE', senderId: 'peer-a' },
+        'peer-a'
+      );
+    });
+
+    const messages = messagesTo(sendTo, 'peer-a');
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: 'DRIVE_MODE',
+        enabled: true,
+        audioOnly: true,
+      })
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({ type: 'VC_STATE', active: true })
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: 'VC_PEER',
+        peerId: 'peer-b',
+        inVc: true,
+      })
+    );
+    expect(messages.some((m) => m.type === 'PARTICIPANTS')).toBe(true);
+  });
+
+  it('ignores REQUEST_STATE on a guest', () => {
+    const sendTo = vi.fn();
+    const { result } = renderHook(() =>
+      useRoomSync({
+        isHost: false,
+        myId: 'guest-1',
+        connected: true,
+        myName: 'Guest',
+        broadcast: vi.fn(),
+        sendTo,
+      })
+    );
+    sendTo.mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'REQUEST_STATE', senderId: 'peer-a' },
+        'peer-a'
+      );
+    });
+
+    expect(sendTo).not.toHaveBeenCalled();
   });
 });
