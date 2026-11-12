@@ -842,11 +842,32 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         case 'NAME_UPDATE': {
           if (!isHost) break;
+          const oldParticipant = participantsRef.current.find(
+            (p) => p.peerId === msg.peerId
+          );
           const updated = dedupeParticipants(
             participantsRef.current.map((p) =>
               p.peerId === msg.peerId ? { ...p, name: msg.name } : p
             )
           );
+          const updatedParticipant = updated.find(
+            (p) => p.peerId === msg.peerId
+          );
+          if (oldParticipant && updatedParticipant) {
+            const oldNorm = normalizeName(oldParticipant.name);
+            const newNorm = normalizeName(updatedParticipant.name);
+            // Move the Controller memory to the new name so a reconnect under
+            // the new nickname restores the role, while the old nickname can no
+            // longer inherit it.
+            if (oldNorm !== newNorm) {
+              controllerMemoryRef.current.delete(oldNorm);
+              if (updatedParticipant.role === 'Controller') {
+                controllerMemoryRef.current.add(newNorm);
+              } else {
+                controllerMemoryRef.current.delete(newNorm);
+              }
+            }
+          }
           setParticipants(updated);
           broadcast({ type: 'PARTICIPANTS', participants: updated, senderId });
           break;

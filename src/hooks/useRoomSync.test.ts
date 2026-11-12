@@ -558,3 +558,88 @@ describe('useRoomSync · STATE_SNAPSHOT before the controller is ready', () => {
     expect(controller.pause).not.toHaveBeenCalled();
   });
 });
+
+describe('useRoomSync · NAME_UPDATE controller memory migration', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function setupController(controllerName: string) {
+    const controller = makeController();
+    const { result, broadcast } = mountHost(controller);
+    act(() => {
+      result.current.onGuestJoined('guest-1', controllerName);
+    });
+    act(() => {
+      result.current.delegateController('guest-1', 'Controller');
+    });
+    return { result, broadcast };
+  }
+
+  it('restores Controller after the guest renames and reconnects', () => {
+    const { result } = setupController('Alice');
+
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'NAME_UPDATE', peerId: 'guest-1', name: 'Bob', senderId: 'guest-1' },
+        'guest-1'
+      );
+    });
+    act(() => {
+      result.current.onGuestLeft('guest-1');
+    });
+    act(() => {
+      result.current.onGuestJoined('guest-1', 'Bob');
+    });
+
+    expect(
+      result.current.participants.find((p) => p.peerId === 'guest-1')?.role
+    ).toBe('Controller');
+  });
+
+  it('does not let a new guest inherit the old name after a Viewer demotion', () => {
+    const { result } = setupController('Alice');
+
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'NAME_UPDATE', peerId: 'guest-1', name: 'Bob', senderId: 'guest-1' },
+        'guest-1'
+      );
+    });
+    act(() => {
+      result.current.delegateController('guest-1', 'Viewer');
+    });
+    act(() => {
+      result.current.onGuestJoined('guest-2', 'Alice');
+    });
+
+    expect(
+      result.current.participants.find((p) => p.peerId === 'guest-2')?.role
+    ).toBe('Viewer');
+  });
+
+  it('updates the displayed name and broadcasts participants once', () => {
+    const { result, broadcast } = setupController('Alice');
+    broadcast.mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'NAME_UPDATE', peerId: 'guest-1', name: 'Bob', senderId: 'guest-1' },
+        'guest-1'
+      );
+    });
+
+    expect(
+      result.current.participants.find((p) => p.peerId === 'guest-1')?.name
+    ).toBe('Bob');
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'PARTICIPANTS' })
+    );
+  });
+});
