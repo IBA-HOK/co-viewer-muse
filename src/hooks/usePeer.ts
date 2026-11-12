@@ -200,7 +200,19 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       });
       conn.on('error', () => {
         if (!isCurrentConn()) return;
-        if (!isHostRef.current) {
+        if (isHostRef.current) {
+          // PeerJS does not guarantee a close event after an error. Treat the
+          // error as a departure so the guest does not linger as a ghost.
+          guestConnsRef.current.delete(conn.peer);
+          guestJoinedFiredRef.current.delete(conn.peer);
+          pendingQueueRef.current.delete(conn.peer);
+          cbRef.current.onGuestDisconnected(conn.peer);
+          try {
+            conn.close();
+          } catch {
+            /* noop */
+          }
+        } else {
           clearConnectTimer();
           setConnected(false);
           cbRef.current.onHostDisconnected();

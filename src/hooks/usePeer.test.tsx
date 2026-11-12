@@ -209,4 +209,114 @@ describe('usePeer · stale DataConnection identity guards', () => {
     expect(conn2.send).toHaveBeenCalledWith(msg);
     expect(conn1.send).not.toHaveBeenCalled();
   });
+
+  it('host treats a current guest conn error as a departure and ignores the later close', () => {
+    const opts = makeOptions(null);
+    renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn1 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn1));
+    act(() => openConn(conn1));
+    expect(opts.onGuestConnected).toHaveBeenCalledTimes(1);
+
+    act(() => conn1.emit('error', new Error('datachannel error')));
+
+    expect(opts.onGuestDisconnected).toHaveBeenCalledTimes(1);
+    expect(opts.onGuestDisconnected).toHaveBeenCalledWith('guest-1');
+    expect(conn1.close).toHaveBeenCalledTimes(1);
+
+    // The close emitted by conn1.close() (or a later one) must not notify twice.
+    act(() => conn1.emit('close'));
+    expect(opts.onGuestDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it('host notifies onGuestConnected again when the same peer reconnects after an error', () => {
+    const opts = makeOptions(null);
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn1 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn1));
+    act(() => openConn(conn1));
+    act(() => conn1.emit('error', new Error('datachannel error')));
+
+    const conn2 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn2));
+
+    expect(opts.onGuestConnected).toHaveBeenCalledTimes(2);
+    act(() => openConn(conn2));
+
+    const msg = makeMsg(3);
+    act(() => result.current.broadcast(msg));
+
+    expect(conn2.send).toHaveBeenCalledWith(msg);
+    expect(conn1.send).not.toHaveBeenCalled();
+  });
+
+  it('host ignores an error from a replaced guest conn', () => {
+    const opts = makeOptions(null);
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn1 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn1));
+    act(() => openConn(conn1));
+
+    const conn2 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn2));
+    act(() => openConn(conn2));
+
+    act(() => conn1.emit('error', new Error('stale error')));
+
+    expect(opts.onGuestDisconnected).not.toHaveBeenCalled();
+
+    const msg = makeMsg(4);
+    act(() => result.current.broadcast(msg));
+
+    expect(conn2.send).toHaveBeenCalledWith(msg);
+  });
+
+  it('host discards the pending queue for a guest whose conn errors', () => {
+    const opts = makeOptions(null);
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn1 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn1));
+
+    // conn1 is not open yet, so the message is queued for guest-1.
+    act(() => result.current.sendTo('guest-1', makeMsg(5)));
+    expect(conn1.send).not.toHaveBeenCalled();
+
+    act(() => conn1.emit('error', new Error('datachannel error')));
+
+    const conn2 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn2));
+    act(() => openConn(conn2));
+
+    expect(conn2.send).not.toHaveBeenCalled();
+  });
 });
