@@ -179,6 +179,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const [titles, setTitles] = useState<Record<string, string>>({});
   const [vcActive, setVcActiveState] = useState(false);
   const [vcPeers, setVcPeers] = useState<Set<string>>(new Set());
+  // Latest VC state for callbacks that must not capture a stale render (e.g.
+  // a guest joining right after the host starts VC).
+  const vcActiveRef = useRef(false);
+  const vcPeersRef = useRef<Set<string>>(new Set());
   const [driveMode, setDriveModeState] = useState(false);
   const [driveAudioOnly, setDriveAudioOnlyState] = useState(false);
   const [chatState, setChatState] = useState<{ messages: ChatMessage[]; total: number }>({
@@ -839,16 +843,16 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         }
         case 'VC_STATE': {
+          vcActiveRef.current = msg.active;
           setVcActiveState(msg.active);
           break;
         }
         case 'VC_PEER': {
-          setVcPeers((prev) => {
-            const next = new Set(prev);
-            if (msg.inVc) next.add(msg.peerId);
-            else next.delete(msg.peerId);
-            return next;
-          });
+          const next = new Set(vcPeersRef.current);
+          if (msg.inVc) next.add(msg.peerId);
+          else next.delete(msg.peerId);
+          vcPeersRef.current = next;
+          setVcPeers(next);
           break;
         }
         case 'CHAT_MESSAGE': {
@@ -1177,6 +1181,23 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         audioOnly: driveAudioOnlyRef.current,
         senderId: myId ?? '',
       });
+      // The initial VC_STATE broadcast happened before this guest joined, so
+      // replay the current VC state directly to them.
+      sendTo(peerId, {
+        type: 'VC_STATE',
+        active: vcActiveRef.current,
+        senderId: myId ?? '',
+      });
+      if (vcActiveRef.current) {
+        for (const id of vcPeersRef.current) {
+          sendTo(peerId, {
+            type: 'VC_PEER',
+            peerId: id,
+            inVc: true,
+            senderId: myId ?? '',
+          });
+        }
+      }
       if (currentMediaRef.current) {
         sendTo(peerId, {
           type: 'STATE_SNAPSHOT',
@@ -1217,12 +1238,12 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         senderId: myId ?? '',
       });
       // Stop treating the departed guest as still in the voice call.
-      setVcPeers((prev) => {
-        if (!prev.has(peerId)) return prev;
-        const next = new Set(prev);
+      if (vcPeersRef.current.has(peerId)) {
+        const next = new Set(vcPeersRef.current);
         next.delete(peerId);
-        return next;
-      });
+        vcPeersRef.current = next;
+        setVcPeers(next);
+      }
       broadcast({
         type: 'VC_PEER',
         peerId,
@@ -1236,6 +1257,8 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   );
 
   const onHostLost = useCallback(() => {
+    vcActiveRef.current = false;
+    vcPeersRef.current = new Set();
     setVcActiveState(false);
     setVcPeers(new Set());
     setParticipants((prev) => dedupeParticipants(prev.filter((p) => p.peerId === myId)));
@@ -1267,6 +1290,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   const setVcActive = useCallback(
     (active: boolean) => {
+      vcActiveRef.current = active;
       setVcActiveState(active);
       broadcast({ type: 'VC_STATE', active, senderId: myId ?? '' });
     },
@@ -1276,12 +1300,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const broadcastVcPeer = useCallback(
     (inVc: boolean) => {
       const id = myId ?? '';
-      setVcPeers((prev) => {
-        const next = new Set(prev);
-        if (inVc) next.add(id);
-        else next.delete(id);
-        return next;
-      });
+      const next = new Set(vcPeersRef.current);
+      if (inVc) next.add(id);
+      else next.delete(id);
+      vcPeersRef.current = next;
+      setVcPeers(next);
       broadcast({ type: 'VC_PEER', peerId: id, inVc, senderId: id });
     },
     [broadcast, myId]
