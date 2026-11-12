@@ -665,7 +665,7 @@ export default function App() {
                   onRemove={roomSync.removeFromQueue}
                   onMove={roomSync.moveInQueue}
                 />
-                <BrowserPanel onAddToQueue={handleLoadMedia} />
+                <BrowserPanel onAddToQueue={handleLoadMedia} canQueue={roomSync.canQueue} />
                 <ChatPanel
                   messages={roomSync.chat}
                   myId={transport.myId}
@@ -914,7 +914,7 @@ export default function App() {
           {/* browser above peers/voice (full width) */}
           {!isFullscreen && (
             <div className="lg:col-span-12">
-              <BrowserPanel onAddToQueue={handleLoadMedia} />
+              <BrowserPanel onAddToQueue={handleLoadMedia} canQueue={roomSync.canQueue} />
             </div>
           )}
 

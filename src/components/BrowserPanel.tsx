@@ -11,7 +11,10 @@ import { parseMediaInput } from '../types';
 
 interface BrowserPanelProps {
   onAddToQueue: (url: string) => void;
+  canQueue?: boolean;
 }
+
+const QUEUE_READ_ONLY_TITLE = 'キューに追加する権限がありません（VIEWER）';
 
 const BOOKMARKS_KEY = 'co-viewer:browser-bookmarks';
 
@@ -24,7 +27,7 @@ function loadJSON<T>(key: string, fallback: T): T {
   }
 }
 
-export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
+export default function BrowserPanel({ onAddToQueue, canQueue = true }: BrowserPanelProps) {
   const [expanded, setExpanded] = useState(() => {
     try {
       const v = localStorage.getItem('co-viewer:browser-expanded');
@@ -121,6 +124,12 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
     const parsed = parseMediaInput(q);
     if (parsed) {
       cancelPendingSearches();
+      if (!canQueue) {
+        setError(
+          'キューに追加する権限がありません（VIEWER · QUEUE READ ONLY）。キーワード検索は利用できます。'
+        );
+        return;
+      }
       onAddToQueue(q);
       setQuery('');
       setError(null);
@@ -234,7 +243,10 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
     return () => observer.disconnect();
   }, [hasMore, loading, loadingMore, error, loadMore]);
 
-  const addToQueue = (r: SearchResult) => onAddToQueue(watchUrl(r));
+  const addToQueue = (r: SearchResult) => {
+    if (!canQueue) return;
+    onAddToQueue(watchUrl(r));
+  };
 
   const openOriginal = (r: SearchResult) => {
     const w = window.open(watchUrl(r), '_blank', 'noopener');
@@ -333,6 +345,15 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
             </div>
           </div>
 
+          {!canQueue && (
+            <p
+              className="nothing-mono border border-[var(--nothing-border)] bg-[var(--nothing-surface-raised)] px-2 py-1 text-[10px] tracking-widest text-[var(--nothing-text-dim)]"
+              title={QUEUE_READ_ONLY_TITLE}
+            >
+              VIEWER · QUEUE READ ONLY
+            </p>
+          )}
+
           {error && <p className="nothing-mono border border-[var(--nothing-red)]/30 bg-[var(--nothing-red-dim)] px-2 py-1 text-xs text-[var(--nothing-red)]">{error}</p>}
 
           {sorted.length > 0 && (
@@ -377,9 +398,11 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
                     <div className="mt-1 flex flex-wrap gap-1">
                       <button
                         type="button"
-                        disabled={animStates[keyFor(r)] === 'pending'}
+                        disabled={!canQueue || animStates[keyFor(r)] === 'pending'}
+                        aria-disabled={!canQueue ? true : undefined}
+                        title={!canQueue ? QUEUE_READ_ONLY_TITLE : undefined}
                         onClick={() => {
-                          if (animStates[keyFor(r)] === 'pending') return;
+                          if (!canQueue || animStates[keyFor(r)] === 'pending') return;
                           triggerAnim(keyFor(r));
                           addToQueue(r);
                         }}
@@ -441,9 +464,11 @@ export default function BrowserPanel({ onAddToQueue }: BrowserPanelProps) {
                     </button>
                       <button
                         type="button"
-                        disabled={animStates[bookmarkKey(b)] === 'pending'}
+                        disabled={!canQueue || animStates[bookmarkKey(b)] === 'pending'}
+                        aria-disabled={!canQueue ? true : undefined}
+                        title={!canQueue ? QUEUE_READ_ONLY_TITLE : undefined}
                         onClick={() => {
-                          if (animStates[bookmarkKey(b)] === 'pending') return;
+                          if (!canQueue || animStates[bookmarkKey(b)] === 'pending') return;
                           triggerAnim(bookmarkKey(b));
                           onAddToQueue(b);
                         }}

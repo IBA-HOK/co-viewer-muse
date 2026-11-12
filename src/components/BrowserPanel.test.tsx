@@ -338,6 +338,113 @@ describe('BrowserPanel harness', () => {
     expect(screen.queryByText('SEARCHING…')).toBeNull();
   });
 
+  it('disables result queue buttons and does not animate when canQueue is false', async () => {
+    const onAdd = vi.fn();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/v1/search')) {
+          return Promise.resolve(jsonResponse(invidiousItems('readonly-result', 1)));
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${url}`));
+      }) as unknown as typeof fetch,
+    );
+
+    render(<BrowserPanel onAddToQueue={onAdd} canQueue={false} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    expect(screen.getByText('VIEWER · QUEUE READ ONLY')).toBeTruthy();
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'readonly result query' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+
+    await waitFor(() => expect(screen.getByText('readonly-result item 0')).toBeTruthy());
+    const queueBtn = screen.getByText('＋ QUEUE') as HTMLButtonElement;
+    expect(queueBtn.disabled).toBe(true);
+    expect(queueBtn.getAttribute('aria-disabled')).toBe('true');
+    expect(queueBtn.getAttribute('title')).toContain('権限');
+
+    fireEvent.click(queueBtn);
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(screen.queryByText('✓ QUEUED')).toBeNull();
+  });
+
+  it('disables bookmark queue buttons when canQueue is false', () => {
+    const onAdd = vi.fn();
+    const bookmarkUrl = 'https://www.youtube.com/watch?v=readonlyBookmark';
+    window.localStorage.setItem(
+      'co-viewer:browser-bookmarks',
+      JSON.stringify([bookmarkUrl]),
+    );
+
+    render(<BrowserPanel onAddToQueue={onAdd} canQueue={false} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+
+    const bookmarkBtn = screen.getByLabelText('キューに追加') as HTMLButtonElement;
+    expect(bookmarkBtn.disabled).toBe(true);
+    expect(bookmarkBtn.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(bookmarkBtn);
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(screen.queryByText('✓')).toBeNull();
+  });
+
+  it('rejects direct media URLs but still allows keyword search when canQueue is false', async () => {
+    const onAdd = vi.fn();
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(jsonResponse(invidiousItems('readonly-keyword', 1))),
+    );
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    render(<BrowserPanel onAddToQueue={onAdd} canQueue={false} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { value: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+    });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(screen.getByText(/キューに追加する権限がありません/)).toBeTruthy();
+
+    fireEvent.change(input, { target: { value: 'readonly keyword query' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText('readonly-keyword item 0')).toBeTruthy(),
+    );
+  });
+
+  it('queues a result and shows ✓ QUEUED when canQueue is omitted', async () => {
+    const onAdd = vi.fn();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/v1/search')) {
+          return Promise.resolve(jsonResponse(invidiousItems('default-queue', 1)));
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${url}`));
+      }) as unknown as typeof fetch,
+    );
+
+    render(<BrowserPanel onAddToQueue={onAdd} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'default queue query' } });
+    fireEvent.click(screen.getByText('LOAD / SEARCH'));
+
+    await waitFor(() => expect(screen.getByText('default-queue item 0')).toBeTruthy());
+    const queueBtn = screen.getByText('＋ QUEUE') as HTMLButtonElement;
+    expect(queueBtn.disabled).toBe(false);
+    fireEvent.click(queueBtn);
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onAdd).toHaveBeenCalledWith(
+      'https://www.youtube.com/watch?v=default-queue-0',
+    );
+    await waitFor(() => expect(screen.getByText('✓ QUEUED')).toBeTruthy());
+  });
+
   it('keeps a newer loadMore/loading state when an old loadMore resolves late', async () => {
     const oldPage2 = deferred<Response>();
     const newSearch = deferred<Response>();
