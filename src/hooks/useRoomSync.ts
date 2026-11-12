@@ -375,6 +375,16 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     });
   }, [queue, titles, titleRetryTick]);
 
+  /**
+   * Update the playing state and its ref together. Queue switching/removal can
+   * be followed immediately by a JOIN gesture or tab-resume decision, which
+   * read the ref before the next render commits.
+   */
+  const setPlayingState = useCallback((next: boolean) => {
+    isPlayingRef.current = next;
+    setIsPlaying(next);
+  }, []);
+
   /** Apply a remote command while suppressing the local change listener. */
   const applyRemote = useCallback((fn: () => void) => {
     isRemoteSyncingRef.current = true;
@@ -742,7 +752,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             if (it) {
               // The new item is playing for the room. Drive-mode guests do not
               // operate their player, but their state must still reflect it.
-              setIsPlaying(true);
+              setPlayingState(true);
               if (!(driveModeRef.current && !isHost)) {
                 if (!isHost) {
                   remoteClockRef.current = {
@@ -761,7 +771,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
                 });
               }
             } else {
-              setIsPlaying(false);
+              setPlayingState(false);
             }
           }
           break;
@@ -878,7 +888,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         broadcast(msg);
       }
     },
-    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendTo]
+    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendTo, setPlayingState]
   );
 
   const reportLocalEvent = useCallback(
@@ -1002,10 +1012,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           controllerRef.current?.seekTo(0);
           controllerRef.current?.play();
         });
-        setIsPlaying(true);
-        isPlayingRef.current = true;
         setCurrentTime(0);
       }
+      // The room is playing the new item. Reflect that even for drive-mode
+      // guests, which leave the actual player operation to the host.
+      setPlayingState(true);
       broadcast({
         type: 'QUEUE_UPDATE',
         queue: queueRef.current,
@@ -1015,7 +1026,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       });
       if (isHost) emitSyncPing();
     },
-    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard]
+    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
   );
 
   const goNext = useCallback(() => {
@@ -1049,20 +1060,26 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         const replacement = nextQueue[idx - 1] ?? nextQueue[idx] ?? null;
         nextCurrentId = replacement ? replacement.id : null;
         resetDriftGuard(!!replacement);
-        if (replacement && (!driveModeRef.current || isHost)) {
-          applyRemote(() => {
-            controllerRef.current?.loadMedia(replacement.videoId);
-            // The old playhead can still be reported right after loadMedia();
-            // the replacement must start from the beginning.
-            controllerRef.current?.seekTo(0);
-            controllerRef.current?.play();
-          });
-          setIsPlaying(true);
-          setCurrentTime(0);
-          nextCurrentTime = 0;
-        } else if (!replacement && (!driveModeRef.current || isHost)) {
-          applyRemote(() => controllerRef.current?.pause());
-          setIsPlaying(false);
+        if (replacement) {
+          // The replacement is playing for the room, including when this client
+          // is a drive-mode guest that does not operate its own player.
+          setPlayingState(true);
+          if (!driveModeRef.current || isHost) {
+            applyRemote(() => {
+              controllerRef.current?.loadMedia(replacement.videoId);
+              // The old playhead can still be reported right after loadMedia();
+              // the replacement must start from the beginning.
+              controllerRef.current?.seekTo(0);
+              controllerRef.current?.play();
+            });
+            setCurrentTime(0);
+            nextCurrentTime = 0;
+          }
+        } else {
+          setPlayingState(false);
+          if (!driveModeRef.current || isHost) {
+            applyRemote(() => controllerRef.current?.pause());
+          }
         }
       }
       setQueue(nextQueue);
@@ -1076,7 +1093,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       });
       if (isHost) emitSyncPing();
     },
-    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard]
+    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
   );
 
   const moveInQueue = useCallback(
