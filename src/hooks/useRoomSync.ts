@@ -266,20 +266,37 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     chatRef.current = chat;
   }, [chat]);
 
+  /**
+   * The myId used for the previous self-seed. A transport switch (PeerJS ->
+   * MQTT) changes myId, and the old entry must be removed instead of being
+   * left behind as a second self (and, on the host, as a second Host).
+   */
+  const prevMyIdRef = useRef<string | null>(null);
+
   // Seed self into the participant list once our id is known.
   useEffect(() => {
     if (!myId) return;
+    const prevMyId = prevMyIdRef.current;
+    prevMyIdRef.current = myId;
     setParticipants((prev) => {
-      const deduped = dedupeParticipants(prev);
-      if (deduped.some((p) => p.peerId === myId)) {
-        return deduped.map((p) =>
+      let next = dedupeParticipants(prev);
+      if (prevMyId && prevMyId !== myId) {
+        next = next.filter((p) => p.peerId !== prevMyId);
+      }
+      // Only the host may drop stale Host entries: on a guest, the host in the
+      // list is a remote participant whose isHost is legitimately true.
+      if (isHost) {
+        next = next.filter((p) => !p.isHost || p.peerId === myId);
+      }
+      if (next.some((p) => p.peerId === myId)) {
+        return next.map((p) =>
           p.peerId === myId
             ? { ...p, name: isHost ? `${myName} (Host)` : myName, isHost, role: isHost ? ('Host' as Role) : p.role }
             : p
         );
       }
       const self: Participant = { peerId: myId, name: isHost ? `${myName} (Host)` : myName, isHost, role: isHost ? 'Host' : 'Viewer' };
-      return dedupeParticipants([self, ...deduped.filter((p) => p.peerId !== myId)]);
+      return dedupeParticipants([self, ...next.filter((p) => p.peerId !== myId)]);
     });
   }, [myId, isHost, myName]);
 

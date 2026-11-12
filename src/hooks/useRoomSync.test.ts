@@ -749,6 +749,122 @@ describe('useRoomSync · STATE_SNAPSHOT before the controller is ready', () => {
   });
 });
 
+describe('useRoomSync · myId changes on transport switch', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('replaces the stale host entry when myId changes', () => {
+    const { result, rerender } = renderHook(
+      ({ myId }: { myId: string }) =>
+        useRoomSync({
+          isHost: true,
+          myId,
+          connected: true,
+          myName: 'Host',
+          broadcast: vi.fn(),
+          sendTo: vi.fn(),
+        }),
+      { initialProps: { myId: 'peerjs-host' } }
+    );
+
+    act(() => {
+      result.current.onGuestJoined('guest-1', 'Alice');
+    });
+    expect(
+      result.current.participants.some((p) => p.peerId === 'peerjs-host')
+    ).toBe(true);
+
+    rerender({ myId: 'mqtt-host' });
+
+    const hosts = result.current.participants.filter((p) => p.isHost);
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0].peerId).toBe('mqtt-host');
+    expect(
+      result.current.participants.some((p) => p.peerId === 'peerjs-host')
+    ).toBe(false);
+    expect(
+      result.current.participants.some(
+        (p) => p.peerId === 'guest-1' && p.name === 'Alice'
+      )
+    ).toBe(true);
+  });
+
+  it('removes the old guest self and keeps other participants', () => {
+    const { result, rerender } = renderHook(
+      ({ myId }: { myId: string }) =>
+        useRoomSync({
+          isHost: false,
+          myId,
+          connected: true,
+          myName: 'Guest',
+          broadcast: vi.fn(),
+          sendTo: vi.fn(),
+        }),
+      { initialProps: { myId: 'peerjs-guest' } }
+    );
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'PARTICIPANTS',
+          participants: [
+            { peerId: 'peerjs-guest', name: 'Guest', isHost: false, role: 'Viewer' },
+            { peerId: 'guest-alice', name: 'Alice', isHost: false, role: 'Viewer' },
+            { peerId: 'host-1', name: 'Host (Host)', isHost: true, role: 'Host' },
+          ],
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+
+    rerender({ myId: 'mqtt-guest' });
+
+    const selves = result.current.participants.filter(
+      (p) => p.peerId === 'peerjs-guest' || p.peerId === 'mqtt-guest'
+    );
+    expect(selves).toHaveLength(1);
+    expect(selves[0].peerId).toBe('mqtt-guest');
+    expect(
+      result.current.participants.some((p) => p.peerId === 'guest-alice')
+    ).toBe(true);
+    // The remote host entry is not the host client itself, so it survives.
+    expect(
+      result.current.participants.filter((p) => p.isHost)
+    ).toHaveLength(1);
+  });
+
+  it('does not change participants when myId is unchanged', () => {
+    const { result, rerender } = renderHook(
+      ({ myId }: { myId: string }) =>
+        useRoomSync({
+          isHost: true,
+          myId,
+          connected: true,
+          myName: 'Host',
+          broadcast: vi.fn(),
+          sendTo: vi.fn(),
+        }),
+      { initialProps: { myId: 'host-1' } }
+    );
+
+    act(() => {
+      result.current.onGuestJoined('guest-1', 'Alice');
+    });
+    const before = result.current.participants;
+
+    rerender({ myId: 'host-1' });
+
+    expect(result.current.participants).toBe(before);
+  });
+});
+
 describe('useRoomSync · NAME_UPDATE controller memory migration', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
