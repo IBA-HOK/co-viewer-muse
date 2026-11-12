@@ -229,4 +229,214 @@ describe('useMqttTransport', () => {
     handler?.('co-viewer/room/sync', Buffer.from(JSON.stringify(echo)));
     expect(onMessage).not.toHaveBeenCalled();
   });
+
+  it('host handles online presence once with the peer name and ignores itself', () => {
+    const onGuestConnected = vi.fn();
+    const { result } = renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        onMessage: vi.fn(),
+        onGuestConnected,
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      })
+    );
+
+    const client = getMockClient();
+    const handler = getOnHandler(client, 'message');
+    const presenceTopic = `co-viewer/${result.current.roomId}/presence`;
+
+    act(() => {
+      handler?.(
+        presenceTopic,
+        Buffer.from(JSON.stringify({ peerId: 'guest-1', name: 'Alice', online: true }))
+      );
+      handler?.(
+        presenceTopic,
+        Buffer.from(
+          JSON.stringify({ peerId: result.current.myId, name: 'Host', online: true })
+        )
+      );
+    });
+
+    expect(onGuestConnected).toHaveBeenCalledTimes(1);
+    expect(onGuestConnected).toHaveBeenCalledWith('guest-1', 'Alice');
+  });
+
+  it('host falls back to Guest when online presence has no name', () => {
+    const onGuestConnected = vi.fn();
+    const { result } = renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        onMessage: vi.fn(),
+        onGuestConnected,
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      })
+    );
+
+    const client = getMockClient();
+    const handler = getOnHandler(client, 'message');
+    const presenceTopic = `co-viewer/${result.current.roomId}/presence`;
+
+    act(() => {
+      handler?.(presenceTopic, Buffer.from(JSON.stringify({ peerId: 'guest-1', online: true })));
+    });
+
+    expect(onGuestConnected).toHaveBeenCalledWith('guest-1', 'Guest');
+  });
+
+  it('host disconnects guests on offline presence, but guests ignore other guests', () => {
+    const hostOnGuestDisconnected = vi.fn();
+    const host = renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: hostOnGuestDisconnected,
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      })
+    );
+
+    const hostClient = getMockClient();
+    const hostHandler = getOnHandler(hostClient, 'message');
+    const hostRoomId = host.result.current.roomId as string;
+
+    act(() => {
+      hostHandler?.(
+        `co-viewer/${hostRoomId}/presence`,
+        Buffer.from(JSON.stringify({ peerId: 'guest-1', online: false }))
+      );
+    });
+
+    expect(hostOnGuestDisconnected).toHaveBeenCalledTimes(1);
+    expect(hostOnGuestDisconnected).toHaveBeenCalledWith('guest-1');
+
+    host.unmount();
+
+    const guestOnGuestDisconnected = vi.fn();
+    const guestOnHostDisconnected = vi.fn();
+    renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: 'host-room',
+        displayName: 'Guest',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: guestOnGuestDisconnected,
+        onHostDisconnected: guestOnHostDisconnected,
+        onConnected: vi.fn(),
+      })
+    );
+
+    const guestClient = getMockClient();
+    const guestHandler = getOnHandler(guestClient, 'message');
+
+    act(() => {
+      guestHandler?.(
+        'co-viewer/host-room/presence',
+        Buffer.from(JSON.stringify({ peerId: 'other-guest', online: false }))
+      );
+    });
+
+    expect(guestOnGuestDisconnected).not.toHaveBeenCalled();
+    expect(guestOnHostDisconnected).not.toHaveBeenCalled();
+  });
+
+  it('guest calls onHostDisconnected for the host offline presence and MQTT close', () => {
+    const onHostDisconnected = vi.fn();
+    renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: 'host-room',
+        displayName: 'Guest',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected,
+        onConnected: vi.fn(),
+      })
+    );
+
+    const client = getMockClient();
+    const handler = getOnHandler(client, 'message');
+
+    act(() => {
+      handler?.(
+        'co-viewer/host-room/presence',
+        Buffer.from(JSON.stringify({ peerId: 'host-room', online: false }))
+      );
+    });
+
+    expect(onHostDisconnected).toHaveBeenCalledTimes(1);
+
+    const closeHandler = getOnHandler(client, 'close');
+    expect(closeHandler).not.toBeNull();
+    act(() => {
+      closeHandler?.();
+    });
+
+    expect(onHostDisconnected).toHaveBeenCalledTimes(2);
+  });
+
+  it('host does not call onHostDisconnected when MQTT closes', () => {
+    const onHostDisconnected = vi.fn();
+    renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected,
+        onConnected: vi.fn(),
+      })
+    );
+
+    const client = getMockClient();
+    const closeHandler = getOnHandler(client, 'close');
+    expect(closeHandler).not.toBeNull();
+
+    act(() => {
+      closeHandler?.();
+    });
+
+    expect(onHostDisconnected).not.toHaveBeenCalled();
+  });
+
+  it('publishes offline presence before ending the client on unmount', () => {
+    const { result, unmount } = renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: 'host-room',
+        displayName: 'Guest',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      })
+    );
+
+    const myId = result.current.myId as string;
+    const client = getMockClient();
+
+    unmount();
+
+    const presenceCall = client.publish.mock.calls.find(
+      ([topic]: [string]) => topic === 'co-viewer/host-room/presence'
+    );
+    expect(presenceCall).toBeDefined();
+
+    const [, payload, opts] = presenceCall as [string, string, { qos: number; retain: boolean }];
+    expect(JSON.parse(payload)).toEqual({ peerId: myId, online: false });
+    expect(opts).toMatchObject({ qos: 1, retain: false });
+    expect(client.end).toHaveBeenCalled();
+    expect(client.publish.mock.invocationCallOrder[0]).toBeLessThan(
+      client.end.mock.invocationCallOrder[0]
+    );
+  });
 });
