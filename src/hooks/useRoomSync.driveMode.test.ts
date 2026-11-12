@@ -136,6 +136,124 @@ describe('useRoomSync · drive mode role restore', () => {
     expect(roleOf(result.current.participants, 'peer-a')).toBe('Viewer');
   });
 
+  it('does not restore Controller to a Viewer who left during drive mode', () => {
+    const { result } = mountHost();
+
+    act(() => {
+      result.current.onGuestJoined('peer-a', 'Alice');
+    });
+    act(() => {
+      result.current.delegateController('peer-a', 'Viewer');
+    });
+    act(() => {
+      result.current.setDriveMode(true);
+    });
+    act(() => {
+      result.current.onGuestLeft('peer-a');
+    });
+    act(() => {
+      result.current.setDriveMode(false);
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-a', 'Alice');
+    });
+
+    expect(roleOf(result.current.participants, 'peer-a')).toBe('Viewer');
+  });
+
+  it('defaults a guest who joined and left during drive mode to Viewer on reconnect', () => {
+    const { result } = mountHost();
+
+    act(() => {
+      result.current.setDriveMode(true);
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-c', 'Charlie');
+    });
+    expect(roleOf(result.current.participants, 'peer-c')).toBe('Controller');
+
+    act(() => {
+      result.current.onGuestLeft('peer-c');
+    });
+    act(() => {
+      result.current.setDriveMode(false);
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-c', 'Charlie');
+    });
+
+    expect(roleOf(result.current.participants, 'peer-c')).toBe('Viewer');
+  });
+
+  it('keeps Controller for a pre-drive Controller who left during drive mode', () => {
+    const { result } = mountHost();
+
+    act(() => {
+      result.current.onGuestJoined('peer-d', 'Dave');
+    });
+    act(() => {
+      result.current.delegateController('peer-d', 'Controller');
+    });
+    act(() => {
+      result.current.setDriveMode(true);
+    });
+    act(() => {
+      result.current.onGuestLeft('peer-d');
+    });
+    act(() => {
+      result.current.setDriveMode(false);
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-d', 'Dave');
+    });
+
+    expect(roleOf(result.current.participants, 'peer-d')).toBe('Controller');
+  });
+
+  it('keeps Controller for a guest promoted during drive mode who then left', () => {
+    const { result } = mountHost();
+
+    act(() => {
+      result.current.onGuestJoined('peer-a', 'Alice');
+    });
+    act(() => {
+      result.current.setDriveMode(true);
+    });
+    act(() => {
+      result.current.delegateController('peer-a', 'Controller');
+    });
+    act(() => {
+      result.current.onGuestLeft('peer-a');
+    });
+    act(() => {
+      result.current.setDriveMode(false);
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-a', 'Alice');
+    });
+
+    expect(roleOf(result.current.participants, 'peer-a')).toBe('Controller');
+  });
+
+  it('restores Controller on reconnect after leaving in normal mode', () => {
+    const { result } = mountHost();
+
+    act(() => {
+      result.current.onGuestJoined('peer-d', 'Dave');
+    });
+    act(() => {
+      result.current.delegateController('peer-d', 'Controller');
+    });
+    act(() => {
+      result.current.onGuestLeft('peer-d');
+    });
+    act(() => {
+      result.current.onGuestJoined('peer-d', 'Dave');
+    });
+
+    expect(roleOf(result.current.participants, 'peer-d')).toBe('Controller');
+  });
+
   it('returns a drive-mode guest to Viewer so canControl and PLAY broadcast stop', () => {
     const { result, broadcast } = mountGuest();
 

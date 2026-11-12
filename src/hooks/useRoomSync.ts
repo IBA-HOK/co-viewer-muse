@@ -1262,6 +1262,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   const onGuestLeft = useCallback(
     (peerId: string) => {
+      // Read the leaver and their drive-mode snapshot before removing either
+      // one. A drive-mode leaver without a snapshot joined during drive mode,
+      // so their normal-mode role defaults to Viewer.
+      const leaver = participantsRef.current.find((p) => p.peerId === peerId);
+      const backupRole = driveModeRoleBackupRef.current.get(peerId);
       // Build the next list from the ref so the state update and the broadcast
       // carry exactly the same participants (the leaver must disappear from
       // every remaining guest's list immediately).
@@ -1269,6 +1274,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         participantsRef.current.filter((p) => p.peerId !== peerId)
       );
       setParticipants(updated);
+      if (driveModeRef.current && leaver && backupRole !== 'Controller') {
+        // The leaver was only promoted by drive mode. Drop the reconnect
+        // memory now; OFF will no longer see them in participants to fix it.
+        controllerMemoryRef.current.delete(normalizeName(leaver.name));
+      }
       driveModeRoleBackupRef.current.delete(peerId);
       broadcast({
         type: 'PARTICIPANTS',
