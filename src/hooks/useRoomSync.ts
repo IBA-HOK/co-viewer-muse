@@ -754,6 +754,14 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           if (changed) {
             const it = msg.queue.find((q) => q.id === msg.currentId);
             if (it) {
+              // Keep a snapshot that arrives while the player is still mounting
+              // in step with the new item, so it cannot apply the previous
+              // video's position once a controller becomes available.
+              pendingSnapshotRef.current = {
+                videoId: it.videoId,
+                currentTime: msg.currentTime,
+                isPlaying: true,
+              };
               // The new item is playing for the room. Drive-mode guests do not
               // operate their player, but their state must still reflect it.
               setPlayingState(true);
@@ -775,6 +783,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
                 });
               }
             } else {
+              pendingSnapshotRef.current = null;
               setPlayingState(false);
             }
           }
@@ -1280,7 +1289,12 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     const pending = pendingSnapshotRef.current;
     const controller = controllerRef.current;
     if (!pending || !controller) return;
+    // Consume the pending snapshot unconditionally: it is only valid for the
+    // media that was current when it was recorded. A queue change while the
+    // player was mounting leaves it stale and it must not be applied to the
+    // newly mounted video.
     pendingSnapshotRef.current = null;
+    if (pending.videoId !== currentMediaRef.current?.videoId) return;
     applyRemote(() => {
       controller.seekTo(pending.currentTime);
       if (pending.isPlaying) controller.play();

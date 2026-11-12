@@ -493,4 +493,68 @@ describe('useRoomSync · STATE_SNAPSHOT before the controller is ready', () => {
     expect(controller.pause).toHaveBeenCalledTimes(1);
     expect(controller.play).not.toHaveBeenCalled();
   });
+
+  it('does not apply the previous video position after QUEUE_UPDATE selects another item', () => {
+    const result = mountGuestWithoutController();
+    const nextQueue: QueueItem[] = [
+      { id: 'youtube:next1234567', platform: 'youtube', videoId: 'next1234567', addedBy: 'Host' },
+    ];
+
+    act(() => {
+      result.current.handleIncoming(snapshot(true), 'host-1');
+    });
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: nextQueue,
+          currentId: nextQueue[0].id,
+          currentTime: 0,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+
+    const controller = makeController();
+    act(() => {
+      result.current.controllerRef.current = controller;
+      result.current.onControllerReady();
+    });
+
+    expect(controller.seekTo).toHaveBeenCalledTimes(1);
+    expect(controller.seekTo).toHaveBeenCalledWith(0);
+    expect(controller.play).toHaveBeenCalledTimes(1);
+    expect(controller.seekTo).not.toHaveBeenCalledWith(42);
+  });
+
+  it('discards a pending snapshot when QUEUE_UPDATE clears the current item', () => {
+    const result = mountGuestWithoutController();
+
+    act(() => {
+      result.current.handleIncoming(snapshot(true), 'host-1');
+    });
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: [],
+          currentId: null,
+          currentTime: 0,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+
+    const controller = makeController();
+    act(() => {
+      result.current.controllerRef.current = controller;
+      result.current.onControllerReady();
+    });
+
+    expect(controller.seekTo).not.toHaveBeenCalled();
+    expect(controller.play).not.toHaveBeenCalled();
+    expect(controller.pause).not.toHaveBeenCalled();
+  });
 });
