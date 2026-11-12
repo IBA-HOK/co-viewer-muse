@@ -158,6 +158,7 @@ describe('useRoomSync · queue item switch starts at zero', () => {
     seedQueue(result, ['first000001']);
     vi.mocked(controller.loadMedia).mockClear();
     vi.mocked(controller.seekTo).mockClear();
+    vi.mocked(controller.play).mockClear();
     vi.mocked(controller.getCurrentTime).mockReturnValue(30);
 
     act(() => {
@@ -166,7 +167,196 @@ describe('useRoomSync · queue item switch starts at zero', () => {
 
     expect(controller.loadMedia).toHaveBeenCalledWith('first000001');
     expect(controller.seekTo).toHaveBeenCalledWith(0);
-    expect(lastQueueUpdate(broadcast)?.currentTime).toBe(0);
+    expect(controller.play).toHaveBeenCalledTimes(1);
+    expect(lastQueueUpdate(broadcast)).toMatchObject({
+      type: 'QUEUE_UPDATE',
+      currentId: 'youtube:first000001',
+      currentTime: 0,
+      restart: true,
+    });
+  });
+
+  it('does not mark a switch to a different queue item as a restart', () => {
+    const controller = makeController();
+    const { result, broadcast } = mountHost(controller);
+    seedQueue(result, ['first000001', 'second00001']);
+
+    act(() => {
+      result.current.goToItem('youtube:second00001');
+    });
+
+    expect(lastQueueUpdate(broadcast)).toMatchObject({
+      type: 'QUEUE_UPDATE',
+      currentId: 'youtube:second00001',
+      currentTime: 0,
+    });
+    expect(lastQueueUpdate(broadcast)?.restart).toBeUndefined();
+  });
+
+  it('reloads and plays at zero on a guest for a restarted current item', () => {
+    const controller = makeController();
+    const result = mountGuest(controller);
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: QUEUE,
+          currentId: QUEUE[0].id,
+          currentTime: 25,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+    vi.mocked(controller.loadMedia).mockClear();
+    vi.mocked(controller.seekTo).mockClear();
+    vi.mocked(controller.play).mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: QUEUE,
+          currentId: QUEUE[0].id,
+          currentTime: 0,
+          restart: true,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+
+    expect(controller.loadMedia).toHaveBeenCalledTimes(1);
+    expect(controller.loadMedia).toHaveBeenCalledWith('abc123def45');
+    expect(controller.seekTo).toHaveBeenCalledTimes(1);
+    expect(controller.seekTo).toHaveBeenCalledWith(0);
+    expect(controller.play).toHaveBeenCalledTimes(1);
+    expect(result.current.isPlaying).toBe(true);
+  });
+
+  it('does not reload for a non-restart update of the same current item', () => {
+    const controller = makeController();
+    const result = mountGuest(controller);
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: QUEUE,
+          currentId: QUEUE[0].id,
+          currentTime: 25,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+    vi.mocked(controller.loadMedia).mockClear();
+    vi.mocked(controller.seekTo).mockClear();
+    vi.mocked(controller.play).mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: QUEUE,
+          currentId: QUEUE[0].id,
+          currentTime: 25,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+
+    expect(controller.loadMedia).not.toHaveBeenCalled();
+    expect(controller.seekTo).not.toHaveBeenCalled();
+    expect(controller.play).not.toHaveBeenCalled();
+  });
+
+  it('applies its own restart echo without reloading the player twice', () => {
+    const controller = makeController();
+    const result = mountGuest(controller);
+    const updatedQueue: QueueItem[] = [
+      ...QUEUE,
+      { id: 'youtube:extra000001', platform: 'youtube', videoId: 'extra000001', addedBy: 'Host' },
+    ];
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: QUEUE,
+          currentId: QUEUE[0].id,
+          currentTime: 25,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+    vi.mocked(controller.loadMedia).mockClear();
+    vi.mocked(controller.seekTo).mockClear();
+    vi.mocked(controller.play).mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: updatedQueue,
+          currentId: QUEUE[0].id,
+          currentTime: 0,
+          restart: true,
+          senderId: 'guest-1',
+        },
+        'guest-1'
+      );
+    });
+
+    expect(result.current.queue).toHaveLength(2);
+    expect(result.current.currentId).toBe(QUEUE[0].id);
+    expect(controller.loadMedia).not.toHaveBeenCalled();
+    expect(controller.seekTo).not.toHaveBeenCalled();
+    expect(controller.play).not.toHaveBeenCalled();
+  });
+
+  it('reloads on the host when a guest Controller restarts the current item', () => {
+    const controller = makeController();
+    const { result, broadcast } = mountHost(controller);
+    seedQueue(result, ['first000001']);
+    vi.mocked(controller.loadMedia).mockClear();
+    vi.mocked(controller.seekTo).mockClear();
+    vi.mocked(controller.play).mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: [
+            {
+              id: 'youtube:first000001',
+              platform: 'youtube',
+              videoId: 'first000001',
+              addedBy: 'Host',
+            },
+          ],
+          currentId: 'youtube:first000001',
+          currentTime: 0,
+          restart: true,
+          senderId: 'guest-1',
+        },
+        'guest-1'
+      );
+    });
+
+    expect(controller.loadMedia).toHaveBeenCalledWith('first000001');
+    expect(controller.seekTo).toHaveBeenCalledWith(0);
+    expect(controller.play).toHaveBeenCalledTimes(1);
+    expect(lastQueueUpdate(broadcast)).toMatchObject({
+      type: 'QUEUE_UPDATE',
+      currentId: 'youtube:first000001',
+      currentTime: 0,
+      restart: true,
+      senderId: 'guest-1',
+    });
   });
 
   it('seeks to zero when removal advances to a replacement item', () => {

@@ -58,6 +58,11 @@ export type SyncMessage =
       queue: QueueItem[];
       currentId: string | null;
       currentTime: number;
+      /**
+       * A reselect of the already-current item must still reload it on peers.
+       * Optional for backward compatibility: older senders/clients omit it.
+       */
+      restart?: boolean;
       senderId: string;
     }
   | {

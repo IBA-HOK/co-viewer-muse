@@ -750,8 +750,9 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         case 'QUEUE_UPDATE': {
           setQueue(msg.queue);
           const changed = msg.currentId !== currentIdRef.current;
+          const restart = msg.restart === true;
           setCurrentId(msg.currentId);
-          if (changed) {
+          if (changed || restart) {
             const it = msg.queue.find((q) => q.id === msg.currentId);
             if (it) {
               // Keep a snapshot that arrives while the player is still mounting
@@ -776,11 +777,16 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
                 // New media: forget the old item's fallback history and keep
                 // automatic corrections away while it loads.
                 resetDriftGuard(true);
-                applyRemote(() => {
-                  controllerRef.current?.loadMedia(it.videoId);
-                  controllerRef.current?.seekTo(msg.currentTime);
-                  controllerRef.current?.play();
-                });
+                // A restart we sent ourselves comes back only via the PeerJS
+                // star re-broadcast; the local player was already restarted in
+                // goToItem, so applying it again would reload it twice.
+                if (!(restart && msg.senderId === myId)) {
+                  applyRemote(() => {
+                    controllerRef.current?.loadMedia(it.videoId);
+                    controllerRef.current?.seekTo(msg.currentTime);
+                    controllerRef.current?.play();
+                  });
+                }
               }
             } else {
               pendingSnapshotRef.current = null;
@@ -1036,6 +1042,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (!canControlNow()) return;
       const it = queueRef.current.find((q) => q.id === id);
       if (!it) return;
+      const restart = id === currentIdRef.current;
       setCurrentId(id);
       resetDriftGuard(true);
       if (!driveModeRef.current || isHost) {
@@ -1056,6 +1063,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         queue: queueRef.current,
         currentId: id,
         currentTime: 0,
+        ...(restart ? { restart: true } : {}),
         senderId: myId ?? '',
       });
       if (isHost) emitSyncPing();
