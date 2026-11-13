@@ -259,8 +259,18 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
           }
         } else {
           clearConnectTimer();
+          // PeerJS does not guarantee a close event after an error. Detach the
+          // failed connection before closing it so the timer callback can
+          // reconnect, and so any close emitted by close()/PeerJS is ignored by
+          // the identity guard (no duplicate onHostDisconnected/reconnect).
+          hostConnRef.current = null;
           setConnected(false);
           cbRef.current.onHostDisconnected();
+          try {
+            conn.close();
+          } catch {
+            /* noop */
+          }
           scheduleReconnect();
         }
       });
@@ -316,7 +326,10 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
     attemptRef.current += 1;
     reconnectTimerRef.current = window.setTimeout(() => {
       reconnectTimerRef.current = undefined;
-      if (!hostConnRef.current?.open && roomIdRef.current) {
+      // Retry when the current DataConnection is not open OR the hook is no
+      // longer connected. The latter covers a PeerJS error that leaves the
+      // failed connection object (and its `open` flag) in place.
+      if (roomIdRef.current && (!hostConnRef.current?.open || !connectedRef.current)) {
         connectToHost(roomIdRef.current);
       }
     }, delay);
