@@ -30,6 +30,8 @@ export type TransportTopology = 'star' | 'bus';
 export interface TransportOptions {
   roomIdFromUrl: string | null;
   displayName: string;
+  /** When false (default true), the transport must not open a connection. */
+  enabled?: boolean;
   onMessage: (msg: SyncMessage, fromPeerId: string) => void;
   onGuestConnected: (peerId: string, name: string) => void;
   onGuestDisconnected: (peerId: string) => void;

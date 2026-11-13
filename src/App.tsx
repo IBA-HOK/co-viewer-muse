@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePeer as usePeerHook } from './hooks/usePeer';
 import { useMqttTransport } from './transport/mqtt';
-import { getTransportKind } from './transport/types';
+import { getTransportKind, type TransportKind } from './transport/types';
 import { useRoomSync } from './hooks/useRoomSync';
 import { useVoiceChat } from './hooks/useVoiceChat';
 import { Player } from './components/Player';
@@ -123,36 +123,77 @@ export default function App() {
 
   const transportKind = getTransportKind();
 
+  // Only the sync transport currently driving roomSync may mutate room state.
+  // PeerJS stays alive for voice in MQTT mode, and MQTT may still deliver
+  // retained messages, so callback routing is gated by this ref.
+  const selectedSyncTransportRef = useRef<TransportKind>('peerjs');
+  const mqttFallbackRef = useRef(false);
+
   const roomSyncRef = useRef<ReturnType<typeof useRoomSync> | null>(null);
-  const handleMessage = useCallback((msg: SyncMessage, fromPeerId: string) => {
+  const handlePeerMessage = useCallback((msg: SyncMessage, fromPeerId: string) => {
+    if (selectedSyncTransportRef.current !== 'peerjs') return;
+    roomSyncRef.current?.handleIncoming(msg, fromPeerId);
+  }, []);
+  const handleMqttMessage = useCallback((msg: SyncMessage, fromPeerId: string) => {
+    if (selectedSyncTransportRef.current !== 'mqtt') return;
     roomSyncRef.current?.handleIncoming(msg, fromPeerId);
   }, []);
 
   const peerTransport = usePeerHook({
     roomIdFromUrl,
     displayName: nickname,
-    onMessage: handleMessage,
-    onGuestConnected: (peerId, name) => roomSync.onGuestJoined(peerId, name),
-    onGuestDisconnected: (peerId) => roomSync.onGuestLeft(peerId),
-    onHostDisconnected: () => roomSync.onHostLost(),
+    onMessage: handlePeerMessage,
+    onGuestConnected: (peerId, name) => {
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
+      roomSyncRef.current?.onGuestJoined(peerId, name);
+    },
+    onGuestDisconnected: (peerId) => {
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
+      roomSyncRef.current?.onGuestLeft(peerId);
+    },
+    onHostDisconnected: () => {
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
+      roomSyncRef.current?.onHostLost();
+    },
     onConnected: (host) => {
-      if (!host) roomSync.onGuestReady();
+      if (host) return;
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
+      roomSyncRef.current?.onGuestReady();
     },
   });
 
   const mqttTransport = useMqttTransport({
     roomIdFromUrl,
     displayName: nickname,
-    onMessage: handleMessage,
-    onGuestConnected: (peerId, name) => roomSync.onGuestJoined(peerId, name),
-    onGuestDisconnected: (peerId) => roomSync.onGuestLeft(peerId),
-    onHostDisconnected: () => roomSync.onHostLost(),
+    enabled: transportKind === 'mqtt',
+    onMessage: handleMqttMessage,
+    onGuestConnected: (peerId, name) => {
+      if (selectedSyncTransportRef.current !== 'mqtt') return;
+      roomSyncRef.current?.onGuestJoined(peerId, name);
+    },
+    onGuestDisconnected: (peerId) => {
+      if (selectedSyncTransportRef.current !== 'mqtt') return;
+      roomSyncRef.current?.onGuestLeft(peerId);
+    },
+    onHostDisconnected: () => {
+      if (selectedSyncTransportRef.current !== 'mqtt') return;
+      roomSyncRef.current?.onHostLost();
+    },
     onConnected: (host) => {
-      if (!host) roomSync.onGuestReady();
+      if (host) return;
+      // mqtt.connect flips its connected state in the same tick as this
+      // callback, so the selection ref can still point at PeerJS for the
+      // current render. An enabled, non-fallback MQTT transport is the
+      // selected sync path; keep the initial REQUEST_STATE intact.
+      if (selectedSyncTransportRef.current !== 'mqtt') {
+        if (transportKind !== 'mqtt' || mqttFallbackRef.current) return;
+      }
+      roomSyncRef.current?.onGuestReady();
     },
   });
 
   const [mqttFallback, setMqttFallback] = useState(false);
+  mqttFallbackRef.current = mqttFallback;
 
   useEffect(() => {
     if (transportKind !== 'mqtt' || mqttFallback) return;
@@ -170,6 +211,8 @@ export default function App() {
     if (transportKind === 'mqtt' && !mqttFallback && mqttTransport.connected) return mqttTransport;
     return peerTransport;
   }, [transportKind, mqttFallback, mqttTransport, peerTransport]);
+
+  selectedSyncTransportRef.current = transport === mqttTransport ? 'mqtt' : 'peerjs';
 
   const roomSync = useRoomSync({
     isHost: transport.isHost,

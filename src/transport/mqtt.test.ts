@@ -54,6 +54,76 @@ describe('useMqttTransport', () => {
     expect(result.current.topology).toBe('bus');
   });
 
+  it('does not connect or publish when disabled', () => {
+    const { result } = renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        enabled: false,
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      })
+    );
+
+    expect(mqtt.connect).not.toHaveBeenCalled();
+    expect(result.current.connected).toBe(false);
+
+    const msg: SyncMessage = {
+      type: 'QUEUE_UPDATE',
+      queue: [],
+      currentId: null,
+      currentTime: 0,
+      senderId: result.current.myId as string,
+    };
+
+    act(() => {
+      result.current.broadcast(msg);
+      result.current.sendTo('peer-xyz', msg);
+    });
+
+    expect(mqtt.connect).not.toHaveBeenCalled();
+    expect(result.current.connected).toBe(false);
+  });
+
+  it('stops publishing and disconnects when enabled turns false', () => {
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) =>
+        useMqttTransport({
+          roomIdFromUrl: null,
+          displayName: 'Host',
+          enabled,
+          onMessage: vi.fn(),
+          onGuestConnected: vi.fn(),
+          onGuestDisconnected: vi.fn(),
+          onHostDisconnected: vi.fn(),
+          onConnected: vi.fn(),
+        }),
+      { initialProps: { enabled: true } }
+    );
+
+    const client = getMockClient();
+    rerender({ enabled: false });
+    client.publish.mockClear();
+
+    const msg: SyncMessage = {
+      type: 'PLAY',
+      currentTime: 1,
+      senderId: result.current.myId as string,
+    };
+
+    act(() => {
+      result.current.broadcast(msg);
+      result.current.sendTo('peer-xyz', msg);
+    });
+
+    expect(result.current.connected).toBe(false);
+    expect(client.publish).not.toHaveBeenCalled();
+    expect(client.end).toHaveBeenCalled();
+  });
+
   it('broadcast QUEUE_UPDATE with qos1 retain true to state topic', () => {
     const onMessage = vi.fn();
     const onConnected = vi.fn();

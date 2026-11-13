@@ -64,6 +64,7 @@ function isPresenceMessage(value: unknown): value is PresenceMessage {
  * Mirrors usePeer surface; sync travels over mqtt.js, voice stays PeerJS (no-op here).
  */
 export function useMqttTransport(opts: TransportOptions): Transport {
+  const enabled = opts.enabled ?? true;
   const roomIdFromUrlRef = useRef(opts.roomIdFromUrl);
   const cbRef = useRef(opts);
   cbRef.current = opts;
@@ -76,16 +77,19 @@ export function useMqttTransport(opts: TransportOptions): Transport {
   const [connected, setConnected] = useState(false);
 
   const clientRef = useRef<MqttClient | null>(null);
+  const enabledRef = useRef(enabled);
   const myIdRef = useRef(myId);
   const roomIdRef = useRef<string | null>(roomId);
   const isHostRef = useRef(isHost);
 
+  enabledRef.current = enabled;
   myIdRef.current = myId;
   roomIdRef.current = roomId;
   isHostRef.current = isHost;
 
   const publishJson = useCallback(
     (topic: string, msg: SyncMessage, qos: 0 | 1, retain: boolean) => {
+      if (!enabledRef.current) return;
       const client = clientRef.current;
       if (!client) return;
       try {
@@ -100,6 +104,7 @@ export function useMqttTransport(opts: TransportOptions): Transport {
 
   const broadcast = useCallback(
     (msg: SyncMessage) => {
+      if (!enabledRef.current) return;
       const rid = roomIdRef.current;
       if (!rid) return;
       const { topic, qos, retain } = resolvePublishTarget(msg, rid);
@@ -110,6 +115,7 @@ export function useMqttTransport(opts: TransportOptions): Transport {
 
   const sendTo = useCallback(
     (peerId: string, msg: SyncMessage) => {
+      if (!enabledRef.current) return;
       const rid = roomIdRef.current;
       if (!rid) return;
       const topic = dmTopic(rid, peerId);
@@ -124,6 +130,7 @@ export function useMqttTransport(opts: TransportOptions): Transport {
   );
 
   const reconnect = useCallback(() => {
+    if (!enabledRef.current) return;
     const client = clientRef.current;
     if (client) {
       try {
@@ -139,6 +146,10 @@ export function useMqttTransport(opts: TransportOptions): Transport {
   const onCall = useCallback(() => {}, []) as unknown as NonNullable<Transport['onCall']>;
 
   useEffect(() => {
+    if (!enabled) {
+      setConnected(false);
+      return;
+    }
     const rid = roomIdRef.current;
     if (!rid) return;
     const brokerUrl = getMqttBrokerUrl();
@@ -263,7 +274,7 @@ export function useMqttTransport(opts: TransportOptions): Transport {
       setConnected(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [enabled]);
 
   return {
     isHost,
