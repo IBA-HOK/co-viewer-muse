@@ -178,6 +178,10 @@ export default function App() {
     myName: nickname,
     broadcast: transport.broadcast,
     sendTo: transport.sendTo,
+    // MQTT (bus) delivers guest commands directly to every subscriber, so the
+    // host must not re-publish them. PeerJS (star, including the MQTT fallback)
+    // still needs the host relay.
+    relayGuestCommands: (transport.topology ?? 'star') === 'star',
   });
   roomSyncRef.current = roomSync;
 

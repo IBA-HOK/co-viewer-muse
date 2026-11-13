@@ -27,6 +27,13 @@ export interface UseRoomSyncOptions {
   myName: string;
   broadcast: (msg: SyncMessage) => void;
   sendTo: (peerId: string, msg: SyncMessage) => void;
+  /**
+   * Whether the host must re-broadcast guest-originated commands. True for a
+   * star transport (PeerJS) where guests only reach the host; false for a bus
+   * (MQTT) where every publish already reaches every subscriber.
+   * Defaults to true for backward compatibility.
+   */
+  relayGuestCommands?: boolean;
 }
 
 export interface UseRoomSyncResult {
@@ -123,6 +130,7 @@ export function normalizeName(s: string): string {
 
 export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const { isHost, myId, connected, myName, broadcast, sendTo } = opts;
+  const relayGuestCommands = opts.relayGuestCommands ?? true;
 
   const controllerRef = useRef<PlayerController | null>(null);
   /**
@@ -970,7 +978,9 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       }
 
       // Star topology: host rebroadcasts a guest's playback command to other guests.
+      // On a bus transport the broker already delivered it to every subscriber.
       if (
+        relayGuestCommands &&
         isHost &&
         fromPeerId !== myId &&
         (msg.type === 'QUEUE_UPDATE' ||
@@ -980,14 +990,19 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       ) {
         broadcast(msg);
       }
-      if (isHost && fromPeerId !== myId && (msg.type === 'VC_PEER' || msg.type === 'VC_STATE')) {
+      if (
+        relayGuestCommands &&
+        isHost &&
+        fromPeerId !== myId &&
+        (msg.type === 'VC_PEER' || msg.type === 'VC_STATE')
+      ) {
         broadcast(msg);
       }
-      if (isHost && fromPeerId !== myId && msg.type === 'CHAT_MESSAGE') {
+      if (relayGuestCommands && isHost && fromPeerId !== myId && msg.type === 'CHAT_MESSAGE') {
         broadcast(msg);
       }
     },
-    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, resetDriftGuard, sendRoomStateTo, sendTo, setPlayingState]
+    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, relayGuestCommands, resetDriftGuard, sendRoomStateTo, sendTo, setPlayingState]
   );
 
   const reportLocalEvent = useCallback(

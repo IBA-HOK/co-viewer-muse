@@ -270,6 +270,7 @@ export function useMqttTransport(opts: TransportOptions): Transport {
     myId,
     roomId,
     connected,
+    topology: 'bus',
     broadcast,
     sendTo,
     callPeer,

@@ -110,6 +110,19 @@ function makeMsg(n: number): SyncMessage {
   return { type: 'PLAY', currentTime: n, senderId: 'sender-1' };
 }
 
+describe('usePeer · topology', () => {
+  beforeEach(() => {
+    peerMock.MockPeer.instances.length = 0;
+    vi.clearAllMocks();
+  });
+
+  it('reports the star topology', () => {
+    const { result } = renderHook(() => usePeer(makeOptions('room-1')));
+
+    expect(result.current.topology).toBe('star');
+  });
+});
+
 describe('usePeer · stale DataConnection identity guards', () => {
   beforeEach(() => {
     peerMock.MockPeer.instances.length = 0;

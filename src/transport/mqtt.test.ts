@@ -17,7 +17,8 @@ vi.mock('mqtt', () => ({
 
 import mqtt from 'mqtt';
 import { useMqttTransport } from './mqtt';
-import type { SyncMessage } from '../types';
+import { useRoomSync } from '../hooks/useRoomSync';
+import type { QueueItem, SyncMessage } from '../types';
 
 function getMockClient() {
   const connectMock = vi.mocked(mqtt.connect);
@@ -35,6 +36,22 @@ function getOnHandler(client: { on: ReturnType<typeof vi.fn> }, event: string) {
 describe('useMqttTransport', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('reports the bus topology', () => {
+    const { result } = renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      })
+    );
+
+    expect(result.current.topology).toBe('bus');
   });
 
   it('broadcast QUEUE_UPDATE with qos1 retain true to state topic', () => {
@@ -438,5 +455,59 @@ describe('useMqttTransport', () => {
     expect(client.publish.mock.invocationCallOrder[0]).toBeLessThan(
       client.end.mock.invocationCallOrder[0]
     );
+  });
+});
+
+describe('MQTT bus host relay', () => {
+  const QUEUE: QueueItem[] = [
+    { id: 'youtube:abc123def45', platform: 'youtube', videoId: 'abc123def45', addedBy: 'Guest' },
+  ];
+
+  it('does not re-publish a guest Controller QUEUE_UPDATE received over the bus', () => {
+    function useHostHarness() {
+      const roomSyncRef = { current: null as ReturnType<typeof useRoomSync> | null };
+      const transport = useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        onMessage: (msg, fromPeerId) => roomSyncRef.current?.handleIncoming(msg, fromPeerId),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      });
+      const roomSync = useRoomSync({
+        isHost: transport.isHost,
+        myId: transport.myId,
+        connected: transport.connected,
+        myName: 'Host',
+        broadcast: transport.broadcast,
+        sendTo: transport.sendTo,
+        relayGuestCommands: (transport.topology ?? 'star') === 'star',
+      });
+      roomSyncRef.current = roomSync;
+      return { transport, roomSync };
+    }
+
+    const { result } = renderHook(() => useHostHarness());
+    const client = getMockClient();
+    const handler = getOnHandler(client, 'message');
+    expect(handler).not.toBeNull();
+    const roomId = result.current.transport.roomId as string;
+    const guestUpdate: SyncMessage = {
+      type: 'QUEUE_UPDATE',
+      queue: QUEUE,
+      currentId: QUEUE[0].id,
+      currentTime: 0,
+      restart: true,
+      senderId: 'guest-1',
+    };
+
+    act(() => {
+      handler?.(`co-viewer/${roomId}/state`, Buffer.from(JSON.stringify(guestUpdate)));
+    });
+
+    // The other guests received the broker's direct publish; the host must not
+    // produce a second one.
+    expect(client.publish).not.toHaveBeenCalled();
   });
 });

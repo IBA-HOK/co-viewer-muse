@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Peer from 'peerjs';
 import type { DataConnection, MediaConnection } from 'peerjs';
 import type { SyncMessage } from '../types';
+import type { TransportTopology } from '../transport/types';
 
 export interface UsePeerOptions {
   roomIdFromUrl: string | null;
@@ -19,6 +20,8 @@ export interface UsePeerResult {
   myId: string | null;
   roomId: string | null;
   connected: boolean;
+  /** PeerJS is a star: guests only reach the host, which relays to peers. */
+  readonly topology?: TransportTopology;
   broadcast: (msg: SyncMessage) => void;
   sendTo: (peerId: string, msg: SyncMessage) => void;
   callPeer: (peerId: string, stream: MediaStream) => MediaConnection | null;
@@ -427,6 +430,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
     myId,
     roomId,
     connected,
+    topology: 'star',
     broadcast,
     sendTo,
     reconnect,

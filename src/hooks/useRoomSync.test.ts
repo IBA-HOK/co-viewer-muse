@@ -1074,3 +1074,100 @@ describe('useRoomSync · REQUEST_STATE reconnect recovery', () => {
     expect(sendTo).not.toHaveBeenCalled();
   });
 });
+
+describe('useRoomSync · host guest-command relay', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mountHostWithRelay(relayGuestCommands?: boolean) {
+    const controller = makeController();
+    const broadcast = vi.fn();
+    const sendTo = vi.fn();
+    const { result } = renderHook(() =>
+      useRoomSync({
+        isHost: true,
+        myId: 'host-1',
+        connected: true,
+        myName: 'Host',
+        broadcast,
+        sendTo,
+        ...(relayGuestCommands === undefined ? {} : { relayGuestCommands }),
+      })
+    );
+    result.current.controllerRef.current = controller;
+    return { result, broadcast, controller };
+  }
+
+  const guestSeek: SyncMessage = {
+    type: 'SEEK',
+    currentTime: 12,
+    senderId: 'guest-1',
+  };
+  const guestRestart: SyncMessage = {
+    type: 'QUEUE_UPDATE',
+    queue: QUEUE,
+    currentId: QUEUE[0].id,
+    currentTime: 0,
+    restart: true,
+    senderId: 'guest-1',
+  };
+  const guestChat: SyncMessage = {
+    type: 'CHAT_MESSAGE',
+    peerId: 'guest-1',
+    name: 'Guest',
+    text: 'hello',
+    timestamp: 1,
+    senderId: 'guest-1',
+  };
+
+  it('does not re-broadcast guest commands when relayGuestCommands is false', () => {
+    const { result, broadcast } = mountHostWithRelay(false);
+
+    act(() => {
+      result.current.handleIncoming(guestSeek, 'guest-1');
+      result.current.handleIncoming(guestRestart, 'guest-1');
+      result.current.handleIncoming(guestChat, 'guest-1');
+    });
+
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it('re-broadcasts each guest command exactly once when relayGuestCommands is true', () => {
+    const { result, broadcast } = mountHostWithRelay(true);
+
+    act(() => {
+      result.current.handleIncoming(guestSeek, 'guest-1');
+    });
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(broadcast).toHaveBeenLastCalledWith(guestSeek);
+
+    act(() => {
+      result.current.handleIncoming(guestRestart, 'guest-1');
+    });
+    expect(broadcast).toHaveBeenCalledTimes(2);
+    expect(broadcast).toHaveBeenLastCalledWith(guestRestart);
+
+    act(() => {
+      result.current.handleIncoming(guestChat, 'guest-1');
+    });
+    expect(broadcast).toHaveBeenCalledTimes(3);
+    expect(broadcast).toHaveBeenLastCalledWith(guestChat);
+  });
+
+  it('defaults to star relaying when relayGuestCommands is omitted', () => {
+    const { result, broadcast } = mountHostWithRelay();
+
+    act(() => {
+      result.current.handleIncoming(guestSeek, 'guest-1');
+    });
+
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(broadcast).toHaveBeenCalledWith(guestSeek);
+  });
+});

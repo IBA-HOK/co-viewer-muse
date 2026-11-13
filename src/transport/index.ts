@@ -15,6 +15,7 @@ export type {
   Transport,
   TransportOptions,
   TransportKind,
+  TransportTopology,
   TransportFactory,
   CreatePeerTransport,
   CreateMqttTransport,

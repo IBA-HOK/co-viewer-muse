@@ -16,6 +16,14 @@ export interface TransportMediaCall {
 export type TransportKind = 'peerjs' | 'mqtt';
 
 /**
+ * Delivery topology of a transport.
+ * - 'star': guests only reach the host, so the host must relay guest commands.
+ * - 'bus': every publish reaches every subscriber directly, so relaying would
+ *   deliver the same guest command twice.
+ */
+export type TransportTopology = 'star' | 'bus';
+
+/**
  * TransportOptions mirrors UsePeerOptions (src/hooks/usePeer.ts:6-15)
  * but remains transport-agnostic. No peerjs types leak here.
  */
@@ -42,6 +50,8 @@ export interface Transport {
   readonly myId: string | null;
   readonly roomId: string | null;
   readonly connected: boolean;
+  /** Delivery topology; unspecified transports are treated as 'star'. */
+  readonly topology?: TransportTopology;
   broadcast(msg: SyncMessage): void;
   sendTo(peerId: string, msg: SyncMessage): void;
   callPeer?(peerId: string, stream: MediaStream): TransportMediaCall | null;
