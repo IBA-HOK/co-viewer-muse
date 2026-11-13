@@ -74,7 +74,7 @@ export default function VolumeMixerPanel({ controllerRef, voiceChat, participant
     Object.entries(mixer.vcPeers).forEach(([peerId, vol]) => {
       voiceChat.setPeerVolume(peerId, vol);
     });
-  }, [voiceChat, mixer.vcMaster, mixer.vcPeers]);
+  }, [voiceChat.setMasterVolume, voiceChat.setPeerVolume, mixer.vcMaster, mixer.vcPeers]);
 
   const update = (patch: Partial<MixerState>) => setMixer((prev) => ({ ...prev, ...patch }));
 

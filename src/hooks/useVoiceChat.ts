@@ -103,6 +103,9 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const answeredRef = useRef<Set<string>>(new Set());
   const meterTimerRef = useRef<number | undefined>(undefined);
+  /** Last levels published to React, quantized to the display unit (1%). */
+  const lastPublishedLevelsRef = useRef<Record<string, number> | null>(null);
+  const lastPublishedLocalLevelRef = useRef<number | null>(null);
   /** Serializes concurrent start attempts so getUserMedia/AudioContext are created once. */
   const startingPromiseRef = useRef<Promise<boolean> | null>(null);
   /** Incremented per start attempt and on leave/hostStop to cancel a pending start. */
@@ -253,12 +256,32 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
   const startMeter = useCallback(() => {
     if (meterTimerRef.current !== undefined) return;
     meterTimerRef.current = window.setInterval(() => {
+      const prev = lastPublishedLevelsRef.current;
       const levels: Record<string, number> = {};
+      let changed = false;
       remoteAnalysersRef.current.forEach((entry, peerId) => {
-        levels[peerId] = readLevel(entry.analyser);
+        // Quantize to the displayed unit so sub-1% fluctuations are ignored.
+        const level = Math.round(readLevel(entry.analyser) * 100) / 100;
+        levels[peerId] = level;
+        if (!prev || prev[peerId] !== level) changed = true;
       });
-      setAudioLevels(levels);
-      if (localAnalyserRef.current) setLocalLevel(readLevel(localAnalyserRef.current));
+      if (prev && Object.keys(prev).length !== Object.keys(levels).length) changed = true;
+      if (changed) {
+        lastPublishedLevelsRef.current = levels;
+        setAudioLevels(levels);
+      } else if (!prev) {
+        // Remember the initial empty snapshot without re-publishing it.
+        lastPublishedLevelsRef.current = levels;
+      }
+
+      const localAnalyser = localAnalyserRef.current;
+      if (localAnalyser) {
+        const localLevel = Math.round(readLevel(localAnalyser) * 100) / 100;
+        if (localLevel !== lastPublishedLocalLevelRef.current) {
+          lastPublishedLocalLevelRef.current = localLevel;
+          setLocalLevel(localLevel);
+        }
+      }
     }, 100);
   }, [readLevel]);
 
@@ -267,6 +290,8 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       window.clearInterval(meterTimerRef.current);
       meterTimerRef.current = undefined;
     }
+    lastPublishedLevelsRef.current = null;
+    lastPublishedLocalLevelRef.current = null;
     setAudioLevels({});
     setLocalLevel(0);
   }, []);
@@ -691,6 +716,8 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       if (meterTimerRef.current !== undefined) {
         window.clearInterval(meterTimerRef.current);
       }
+      lastPublishedLevelsRef.current = null;
+      lastPublishedLocalLevelRef.current = null;
       connectionsRef.current.forEach((c) => c.close());
       connectionsRef.current.clear();
       rawStreamRef.current?.getTracks().forEach((t) => t.stop());
