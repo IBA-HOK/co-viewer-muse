@@ -273,7 +273,10 @@ export function useYouTubePlayer(
                     applySeek(target);
                     return;
                   }
-                } else {
+                } else if (state === YT.PlayerState.PAUSED) {
+                  // An explicit pause wins over a queued seek. CUED / UNSTARTED
+                  // are not user pauses: keep the seek queued until playback
+                  // actually starts.
                   clearPendingSeek();
                 }
               }

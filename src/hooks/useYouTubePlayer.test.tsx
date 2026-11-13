@@ -154,6 +154,26 @@ describe('useYouTubePlayer · buffering-aware seeking', () => {
     expect(onLocalEvent).not.toHaveBeenCalled();
   });
 
+  it('keeps a queued seek through CUED and applies it once playback starts', async () => {
+    const { result, onLocalEvent } = await mountHook();
+    act(() => player!.emitState(PLAYER_STATE.PLAYING));
+    onLocalEvent.mockClear();
+
+    act(() => player!.emitState(PLAYER_STATE.BUFFERING));
+    act(() => result.current.seekTo(30));
+    expect(player!.seekTo).not.toHaveBeenCalled();
+
+    // CUED just means "ready but not started yet"; it is not a user pause.
+    act(() => player!.emitState(PLAYER_STATE.CUED));
+    expect(player!.seekTo).not.toHaveBeenCalled();
+
+    act(() => player!.emitState(PLAYER_STATE.PLAYING));
+    expect(player!.seekTo).toHaveBeenCalledTimes(1);
+    expect(player!.seekTo).toHaveBeenCalledWith(30, true);
+    // The PLAYING that completes the seek is not a user play intent.
+    expect(onLocalEvent).not.toHaveBeenCalled();
+  });
+
   it('reports how long the last seek spent buffering', async () => {
     const { result, onLocalEvent } = await mountHook();
     act(() => player!.emitState(PLAYER_STATE.PLAYING));
@@ -307,6 +327,8 @@ describe('useYouTubePlayer · buffering-aware seeking', () => {
     vi.useFakeTimers();
     act(() => result.current.seekTo(15));
     expect(player!.seekTo).not.toHaveBeenCalled();
+    // CUED must not discard the queued seek; the watchdog still applies it.
+    act(() => player!.emitState(PLAYER_STATE.CUED));
     act(() => {
       vi.advanceTimersByTime(10_001);
     });
