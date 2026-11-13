@@ -34,6 +34,13 @@ export interface UseRoomSyncOptions {
    * Defaults to true for backward compatibility.
    */
   relayGuestCommands?: boolean;
+  /**
+   * Optional gate for host SYNC_PING broadcasts. When it returns false (e.g.
+   * the host tab is hidden and the browser paused the player locally), no
+   * periodic or immediate ping is sent, so guests keep the room playing state.
+   * Defaults to true.
+   */
+  shouldEmitSyncPing?: () => boolean;
 }
 
 export interface UseRoomSyncResult {
@@ -131,6 +138,11 @@ export function normalizeName(s: string): string {
 export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const { isHost, myId, connected, myName, broadcast, sendTo } = opts;
   const relayGuestCommands = opts.relayGuestCommands ?? true;
+  const shouldEmitSyncPing = opts.shouldEmitSyncPing ?? (() => true);
+  // Keep the latest gate in a ref: the callback is often an inline arrow from
+  // App, and the timer/callbacks must not be re-created on every render.
+  const shouldEmitSyncPingRef = useRef(shouldEmitSyncPing);
+  shouldEmitSyncPingRef.current = shouldEmitSyncPing;
 
   const controllerRef = useRef<PlayerController | null>(null);
   /**
@@ -631,6 +643,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   /** Host time-authority ping: broadcasts current playback state to align peers. */
   const emitSyncPing = useCallback(() => {
+    if (!shouldEmitSyncPingRef.current()) return;
     broadcast({
       type: 'SYNC_PING',
       currentTime: controllerRef.current?.getCurrentTime() ?? 0,
@@ -1623,6 +1636,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   useEffect(() => {
     if (!isHost || !connected || driveMode) return;
     const id = window.setInterval(() => {
+      if (!shouldEmitSyncPingRef.current()) return;
       broadcast({
         type: 'SYNC_PING',
         currentTime: controllerRef.current?.getCurrentTime() ?? 0,

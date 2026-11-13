@@ -236,6 +236,10 @@ export default function App() {
     // host must not re-publish them. PeerJS (star, including the MQTT fallback)
     // still needs the host relay.
     relayGuestCommands: (transport.topology ?? 'star') === 'star',
+    // While the tab is hidden (or a background PAUSE is being suppressed), the
+    // player may be paused locally by the browser. Do not publish that as the
+    // room state: guests must keep playing until the host's resume succeeds.
+    shouldEmitSyncPing: () => !bgPauseRef.current && !isDocumentHidden(),
   });
   roomSyncRef.current = roomSync;
 
