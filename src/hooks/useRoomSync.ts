@@ -414,6 +414,30 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     setIsPlaying(next);
   }, []);
 
+  /**
+   * Commit the participant list and its ref together. Transport events can
+   * arrive several times in the same tick, so a handler must see the list the
+   * previous handler just committed instead of waiting for the render effect.
+   */
+  const commitParticipants = useCallback((next: Participant[]) => {
+    const deduped = dedupeParticipants(next);
+    participantsRef.current = deduped;
+    setParticipants(deduped);
+  }, []);
+
+  /** Commit the queue and its ref together (same-tick queue operations). */
+  const commitQueue = useCallback((next: QueueItem[]) => {
+    queueRef.current = next;
+    setQueue(next);
+  }, []);
+
+  /** Commit the current item pointer and its ref together. */
+  const commitCurrentId = useCallback((next: string | null) => {
+    currentIdRef.current = next;
+    endAdvanceRef.current = null;
+    setCurrentId(next);
+  }, []);
+
   /** Apply a remote command while suppressing the local change listener. */
   const applyRemote = useCallback((fn: () => void) => {
     isRemoteSyncingRef.current = true;
@@ -639,7 +663,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       const senderId = myId ?? '';
       switch (msg.type) {
         case 'PLAY': {
-          setIsPlaying(true);
+          setPlayingState(true);
           if (!isHost && msg.senderId !== myId) {
             remoteClockRef.current = {
               time: msg.currentTime,
@@ -654,7 +678,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         }
         case 'PAUSE': {
-          setIsPlaying(false);
+          setPlayingState(false);
           if (!isHost && msg.senderId !== myId) {
             remoteClockRef.current = {
               time: msg.currentTime,
@@ -748,7 +772,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             // A correction is starting; the tolerated-lag notice is transient.
             setSyncToleranceLag(0);
             setCurrentTime(msg.currentTime);
-            setIsPlaying(msg.isPlaying);
+            setPlayingState(msg.isPlaying);
             applyRemote(() => {
               controller.seekTo(msg.currentTime);
               if (msg.isPlaying) controller.play();
@@ -784,13 +808,13 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             } else if (decision.reason === 'fallback-hold') {
               setSyncToleranceLag(0);
             }
-            setIsPlaying(msg.isPlaying);
+            setPlayingState(msg.isPlaying);
             publishFallbackLevel(pingAt);
           }
           break;
         }
         case 'PARTICIPANTS': {
-          setParticipants(dedupeParticipants(msg.participants));
+          commitParticipants(msg.participants);
           break;
         }
         case 'REQUEST_STATE': {
@@ -815,10 +839,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         }
         case 'QUEUE_UPDATE': {
-          setQueue(msg.queue);
+          commitQueue(msg.queue);
           const changed = msg.currentId !== currentIdRef.current;
           const restart = msg.restart === true;
-          setCurrentId(msg.currentId);
+          commitCurrentId(msg.currentId);
           if (changed || restart) {
             const it = msg.queue.find((q) => q.id === msg.currentId);
             if (it) {
@@ -864,11 +888,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         }
         case 'STATE_SNAPSHOT': {
           markRoomStateReceived();
-          setQueue(msg.queue);
-          setCurrentId(msg.currentId);
+          commitQueue(msg.queue);
+          commitCurrentId(msg.currentId);
           setCurrentTime(msg.currentTime);
-          setIsPlaying(msg.isPlaying);
-          isPlayingRef.current = msg.isPlaying;
+          setPlayingState(msg.isPlaying);
           if (driveModeRef.current && !isHost) break;
           if (!isHost) {
             remoteClockRef.current = {
@@ -941,7 +964,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
               }
             }
           }
-          setParticipants(updated);
+          commitParticipants(updated);
           broadcast({ type: 'PARTICIPANTS', participants: updated, senderId });
           break;
         }
@@ -1002,7 +1025,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         broadcast(msg);
       }
     },
-    [applyRemote, broadcast, clearResyncPending, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, relayGuestCommands, resetDriftGuard, sendRoomStateTo, sendTo, setPlayingState]
+    [applyRemote, broadcast, clearResyncPending, commitCurrentId, commitParticipants, commitQueue, isHost, markRoomStateReceived, myId, publishFallbackLevel, recordHostPing, relayGuestCommands, resetDriftGuard, sendRoomStateTo, sendTo, setPlayingState]
   );
 
   const reportLocalEvent = useCallback(
@@ -1018,10 +1041,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (driveModeRef.current && !isHost && e.kind !== 'PLAY' && e.kind !== 'PAUSE') return;
       const senderId = myId ?? '';
       if (e.kind === 'PLAY') {
-        setIsPlaying(true);
+        setPlayingState(true);
         broadcast({ type: 'PLAY', currentTime: e.currentTime, senderId });
       } else if (e.kind === 'PAUSE') {
-        setIsPlaying(false);
+        setPlayingState(false);
         // A local pause leaves nothing to chase; do not keep the fallback
         // notice up while the room is paused.
         const pauseAt = Date.now();
@@ -1032,7 +1055,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         publishFallbackLevel(pauseAt);
         broadcast({ type: 'PAUSE', currentTime: e.currentTime, senderId });
       } else if (e.kind === 'END') {
-        setIsPlaying(false);
+        setPlayingState(false);
         const cur = currentIdRef.current;
         if (cur && endAdvanceRef.current !== cur) {
           endAdvanceRef.current = cur;
@@ -1040,7 +1063,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         }
       }
     },
-    [broadcast, canControlPlaybackNow, isHost, myId, publishFallbackLevel]
+    [broadcast, canControlPlaybackNow, isHost, myId, publishFallbackLevel, setPlayingState]
   );
 
   const localSeek = useCallback(
@@ -1077,9 +1100,9 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           const idx = queueRef.current.findIndex((q) => q.id === cur);
           return idx === queueRef.current.length - 1 && !isPlayingRef.current;
         })();
-      setQueue(nextQueue);
+      commitQueue(nextQueue);
       if (wasEmpty || wasAtTailAndStopped) {
-        setCurrentId(id);
+        commitCurrentId(id);
         if (!driveModeRef.current || isHost) {
           resetDriftGuard(true);
           applyRemote(() => {
@@ -1087,7 +1110,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             controllerRef.current?.seekTo(0);
             controllerRef.current?.play();
           });
-          setIsPlaying(true);
+          setPlayingState(true);
         }
         broadcast({
           type: 'QUEUE_UPDATE',
@@ -1108,7 +1131,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       });
       if (isHost) emitSyncPing();
     },
-    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard]
+    [applyRemote, broadcast, canControlNow, commitCurrentId, commitQueue, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
   );
 
   const goToItem = useCallback(
@@ -1117,7 +1140,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       const it = queueRef.current.find((q) => q.id === id);
       if (!it) return;
       const restart = id === currentIdRef.current;
-      setCurrentId(id);
+      commitCurrentId(id);
       resetDriftGuard(true);
       if (!driveModeRef.current || isHost) {
         applyRemote(() => {
@@ -1142,7 +1165,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       });
       if (isHost) emitSyncPing();
     },
-    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
+    [applyRemote, broadcast, canControlNow, commitCurrentId, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
   );
 
   const goNext = useCallback(() => {
@@ -1198,8 +1221,8 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           }
         }
       }
-      setQueue(nextQueue);
-      setCurrentId(nextCurrentId);
+      commitQueue(nextQueue);
+      commitCurrentId(nextCurrentId);
       broadcast({
         type: 'QUEUE_UPDATE',
         queue: nextQueue,
@@ -1209,7 +1232,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       });
       if (isHost) emitSyncPing();
     },
-    [applyRemote, broadcast, canControlNow, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
+    [applyRemote, broadcast, canControlNow, commitCurrentId, commitQueue, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
   );
 
   const moveInQueue = useCallback(
@@ -1224,7 +1247,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       const next = [...q];
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
-      setQueue(next);
+      commitQueue(next);
       broadcast({
         type: 'QUEUE_UPDATE',
         queue: next,
@@ -1233,7 +1256,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         senderId: myId ?? '',
       });
     },
-    [broadcast, canControlNow, myId]
+    [broadcast, canControlNow, commitQueue, myId]
   );
 
   const delegateController = useCallback(
@@ -1258,10 +1281,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           p.peerId === peerId ? { ...p, role } : p
         )
       );
-      setParticipants(updated);
+      commitParticipants(updated);
       broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
     },
-    [broadcast, isHost, myId]
+    [broadcast, commitParticipants, isHost, myId]
   );
 
   const onGuestJoined = useCallback(
@@ -1285,7 +1308,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         ...filtered,
         { peerId, name, isHost: false, role },
       ]);
-      setParticipants(updated);
+      commitParticipants(updated);
       broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
       sendRoomStateTo(peerId, updated);
       if (currentMediaRef.current) {
@@ -1309,7 +1332,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         });
       }
     },
-    [broadcast, isHost, myId, sendRoomStateTo, sendTo]
+    [broadcast, commitParticipants, isHost, myId, sendRoomStateTo, sendTo]
   );
 
   const onGuestLeft = useCallback(
@@ -1325,7 +1348,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       const updated = dedupeParticipants(
         participantsRef.current.filter((p) => p.peerId !== peerId)
       );
-      setParticipants(updated);
+      commitParticipants(updated);
       if (driveModeRef.current && leaver && backupRole !== 'Controller') {
         // The leaver was only promoted by drive mode. Drop the reconnect
         // memory now; OFF will no longer see them in participants to fix it.
@@ -1353,7 +1376,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       // Intentionally leave controllerMemoryRef untouched: it restores the
       // guest's role if they reconnect with the same name.
     },
-    [broadcast, myId]
+    [broadcast, commitParticipants, myId]
   );
 
   const onHostLost = useCallback(() => {
@@ -1361,11 +1384,13 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     vcPeersRef.current = new Set();
     setVcActiveState(false);
     setVcPeers(new Set());
-    setParticipants((prev) => dedupeParticipants(prev.filter((p) => p.peerId === myId)));
+    commitParticipants(
+      participantsRef.current.filter((p) => p.peerId === myId)
+    );
     // No host means no time authority and no more SYNC_PING corrections.
     remoteClockRef.current = null;
     resetDriftGuard(false);
-  }, [myId, resetDriftGuard]);
+  }, [commitParticipants, myId, resetDriftGuard]);
 
   const onGuestReady = useCallback(() => {
     broadcast({ type: 'REQUEST_STATE', senderId: myId ?? '' });
@@ -1451,14 +1476,14 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           p.peerId === myId ? { ...p, name: selfName } : p
         )
       );
-      setParticipants(updated);
+      commitParticipants(updated);
       if (isHost) {
         broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
       } else {
         broadcast({ type: 'NAME_UPDATE', peerId: myId ?? '', name, senderId: myId ?? '' });
       }
     },
-    [broadcast, isHost, myId]
+    [broadcast, commitParticipants, isHost, myId]
   );
 
   const setDriveMode = useCallback(
@@ -1483,7 +1508,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         updated.forEach((p) => {
           if (!p.isHost) controllerMemoryRef.current.add(normalizeName(p.name));
         });
-        setParticipants(updated);
+        commitParticipants(updated);
         broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
       } else {
         const updated = dedupeParticipants(
@@ -1502,7 +1527,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           else controllerMemoryRef.current.delete(norm);
         });
         driveModeRoleBackupRef.current.clear();
-        setParticipants(updated);
+        commitParticipants(updated);
         broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
       }
       broadcast({
@@ -1512,7 +1537,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         senderId: myId ?? '',
       });
     },
-    [broadcast, isHost, myId]
+    [broadcast, commitParticipants, isHost, myId]
   );
 
   const setDriveAudioOnly = useCallback(
