@@ -57,6 +57,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
   const nameRef = useRef(opts.displayName);
   const reconnectTimerRef = useRef<number | undefined>(undefined);
   const connectTimerRef = useRef<number | undefined>(undefined);
+  const hostConnectTimersRef = useRef<Map<string, number>>(new Map());
   const callHandlerRef = useRef<((call: MediaConnection) => void) | null>(null);
   const connectedRef = useRef(false);
   const guestJoinedFiredRef = useRef<Set<string>>(new Set());
@@ -164,6 +165,44 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
     }
   }, []);
 
+  const clearHostConnectTimer = useCallback((peerId: string) => {
+    const timer = hostConnectTimersRef.current.get(peerId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      hostConnectTimersRef.current.delete(peerId);
+    }
+  }, []);
+
+  /**
+   * Host-side incoming DataConnection timeout: PeerJS does not guarantee
+   * open/close/error when ICE fails, so abandon a connection that never opens.
+   */
+  const armHostConnectTimer = useCallback(
+    (conn: DataConnection) => {
+      clearHostConnectTimer(conn.peer);
+      if (conn.open) return;
+      let timer: number;
+      timer = window.setTimeout(() => {
+        // A newer connection for the same peer owns the timer slot now.
+        if (hostConnectTimersRef.current.get(conn.peer) !== timer) return;
+        hostConnectTimersRef.current.delete(conn.peer);
+        if (guestConnsRef.current.get(conn.peer) !== conn || conn.open) return;
+        // Remove state before close so the close handler cannot notify twice.
+        guestConnsRef.current.delete(conn.peer);
+        guestJoinedFiredRef.current.delete(conn.peer);
+        pendingQueueRef.current.delete(conn.peer);
+        cbRef.current.onGuestDisconnected(conn.peer);
+        try {
+          conn.close();
+        } catch {
+          /* noop */
+        }
+      }, CONNECT_TIMEOUT_MS);
+      hostConnectTimersRef.current.set(conn.peer, timer);
+    },
+    [clearHostConnectTimer]
+  );
+
   const wireConn = useCallback(
     (conn: DataConnection) => {
       // A replaced DataConnection may still fire open/close/error/data after a
@@ -181,6 +220,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       conn.on('open', () => {
         if (!isCurrentConn()) return;
         clearConnectTimer();
+        if (isHostRef.current) clearHostConnectTimer(conn.peer);
         attemptRef.current = 0;
         flushQueue(isHostRef.current ? conn.peer : '__host__');
         if (!isHostRef.current) {
@@ -190,6 +230,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       });
       conn.on('close', () => {
         if (!isCurrentConn()) return;
+        clearHostConnectTimer(conn.peer);
         if (isHostRef.current) {
           guestConnsRef.current.delete(conn.peer);
           guestJoinedFiredRef.current.delete(conn.peer);
@@ -203,6 +244,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       });
       conn.on('error', () => {
         if (!isCurrentConn()) return;
+        clearHostConnectTimer(conn.peer);
         if (isHostRef.current) {
           // PeerJS does not guarantee a close event after an error. Treat the
           // error as a departure so the guest does not linger as a ghost.
@@ -223,7 +265,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
         }
       });
     },
-    [clearConnectTimer, flushQueue]
+    [clearConnectTimer, clearHostConnectTimer, flushQueue]
   );
 
   const connectToHost = useCallback(
@@ -340,6 +382,9 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
         const prevConn = guestConnsRef.current.get(conn.peer);
         guestConnsRef.current.set(conn.peer, conn);
         wireConn(conn);
+        // Same peer reconnected: the old connection's timeout must not fire
+        // against the replacement.
+        clearHostConnectTimer(conn.peer);
         // Same peer reconnected: replace the old entry first, then close the
         // old conn so its close event cannot delete the new registration.
         if (prevConn && prevConn !== conn) {
@@ -357,6 +402,8 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
         };
         fireOnce();
         if (!conn.open) {
+          // Arm after registration so this timer is the current one for the peer.
+          armHostConnectTimer(conn);
           conn.once('open', () => {
             const cur = guestConnsRef.current.get(conn.peer);
             if (cur === conn && cur.open) {
@@ -407,6 +454,8 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       document.removeEventListener('visibilitychange', handleVis);
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
       clearConnectTimer();
+      hostConnectTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      hostConnectTimersRef.current.clear();
       peerRef.current?.destroy();
       peerRef.current = null;
       hostConnRef.current = null;

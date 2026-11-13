@@ -3,7 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import { usePeer } from './usePeer';
+import { usePeer, CONNECT_TIMEOUT_MS } from './usePeer';
 import type { UsePeerOptions } from './usePeer';
 import type { SyncMessage } from '../types';
 
@@ -331,5 +331,129 @@ describe('usePeer · stale DataConnection identity guards', () => {
     act(() => openConn(conn2));
 
     expect(conn2.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('usePeer · host incoming connection timeout', () => {
+  beforeEach(() => {
+    peerMock.MockPeer.instances.length = 0;
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('notifies onGuestConnected immediately without disconnecting before the timeout', () => {
+    const opts = makeOptions(null);
+    renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn));
+
+    expect(opts.onGuestConnected).toHaveBeenCalledTimes(1);
+
+    act(() => vi.advanceTimersByTime(CONNECT_TIMEOUT_MS - 1));
+    expect(opts.onGuestDisconnected).not.toHaveBeenCalled();
+  });
+
+  it('clears the timer when the incoming conn opens in time', () => {
+    const opts = makeOptions(null);
+    renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn));
+
+    act(() => vi.advanceTimersByTime(CONNECT_TIMEOUT_MS / 2));
+    act(() => openConn(conn));
+    act(() => vi.advanceTimersByTime(CONNECT_TIMEOUT_MS));
+
+    expect(opts.onGuestDisconnected).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('disconnects once after the timeout, drops the pending queue, and ignores late open/close', () => {
+    const opts = makeOptions(null);
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn));
+
+    act(() => result.current.sendTo('guest-1', makeMsg(1)));
+    expect(conn.send).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(CONNECT_TIMEOUT_MS));
+
+    expect(opts.onGuestDisconnected).toHaveBeenCalledTimes(1);
+    expect(opts.onGuestDisconnected).toHaveBeenCalledWith('guest-1');
+    expect(conn.close).toHaveBeenCalledTimes(1);
+
+    const msg = makeMsg(2);
+    // The queued message was dropped rather than being flushed on a new conn.
+    const conn2 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn2));
+    act(() => openConn(conn2));
+    expect(conn2.send).not.toHaveBeenCalled();
+
+    // Messages sent afterwards must not reach the dead conn.
+    act(() => result.current.broadcast(msg));
+    act(() => result.current.sendTo('guest-1', msg));
+    expect(conn.send).not.toHaveBeenCalled();
+
+    // Late events from the abandoned conn must not notify again.
+    act(() => {
+      openConn(conn);
+      conn.emit('close');
+    });
+    expect(opts.onGuestDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let the replaced conn timer disconnect the new connection', () => {
+    const opts = makeOptions(null);
+    renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const conn1 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn1));
+    act(() => vi.advanceTimersByTime(CONNECT_TIMEOUT_MS / 2));
+
+    const conn2 = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', conn2));
+    expect(conn1.close).toHaveBeenCalled();
+
+    // Past conn1's deadline, but before conn2's own timeout: still connected.
+    act(() => vi.advanceTimersByTime(CONNECT_TIMEOUT_MS / 2));
+    expect(opts.onGuestDisconnected).not.toHaveBeenCalled();
+
+    // conn2 never opens: its timer exits the guest once.
+    act(() => vi.advanceTimersByTime(CONNECT_TIMEOUT_MS / 2));
+    expect(opts.onGuestDisconnected).toHaveBeenCalledTimes(1);
+    expect(opts.onGuestDisconnected).toHaveBeenCalledWith('guest-1');
+    expect(conn2.close).toHaveBeenCalledTimes(1);
   });
 });
