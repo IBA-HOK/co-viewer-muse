@@ -14,6 +14,11 @@ import DriveModePanel from './components/DriveModePanel';
 import VolumeMixerPanel from './components/VolumeMixerPanel';
 import { computeUnreadChatCount } from './chatUnread';
 import { scheduleResumeRetries, type ResumeRetryScheduler } from './playbackResume';
+import {
+  cancelNicknameBroadcast,
+  flushNicknameBroadcast,
+  scheduleNicknameBroadcast,
+} from './nicknameBroadcast';
 import JoinModal from './components/JoinModal';
 import InviteQRModal from './components/InviteQRModal';
 import {
@@ -21,6 +26,8 @@ import {
   type Role,
   type SyncMessage,
 } from './types';
+
+export { NICKNAME_BROADCAST_DELAY_MS, scheduleNicknameBroadcast } from './nicknameBroadcast';
 
 function useRoomIdFromUrl(): string | null {
   return useState(
@@ -173,6 +180,20 @@ export default function App() {
     sendTo: transport.sendTo,
   });
   roomSyncRef.current = roomSync;
+
+  const nicknameBroadcastTimerRef = useRef<number | null>(null);
+  const lastNicknameRef = useRef(nickname);
+
+  useEffect(() => {
+    // The initial nickname is already part of JOIN/self seeding; only changes
+    // made from this point on need a debounced broadcast.
+    if (lastNicknameRef.current === nickname) return;
+    lastNicknameRef.current = nickname;
+    scheduleNicknameBroadcast(nicknameBroadcastTimerRef, nickname, (name) => {
+      roomSyncRef.current?.setMyNickname(name);
+    });
+    return () => cancelNicknameBroadcast(nicknameBroadcastTimerRef);
+  }, [nickname]);
 
   const chatSeq = roomSync.chatSeq;
   const unreadCount = computeUnreadChatCount(
@@ -766,9 +787,14 @@ export default function App() {
               value={nickname}
               maxLength={24}
               onChange={(e) => {
-                const v = e.target.value;
-                setNickname(v);
-                roomSync.setMyNickname(v);
+                setNickname(e.target.value);
+              }}
+              onBlur={() => {
+                flushNicknameBroadcast(
+                  nicknameBroadcastTimerRef,
+                  nickname,
+                  (name) => roomSyncRef.current?.setMyNickname(name)
+                );
               }}
               placeholder="DISPLAY NAME"
               className="nothing-mono min-w-0 flex-1 border border-[var(--nothing-border)] bg-black px-2.5 py-1 text-sm text-[var(--nothing-text)] placeholder:text-[var(--nothing-text-faint)] outline-none focus:border-[var(--nothing-red)]"
