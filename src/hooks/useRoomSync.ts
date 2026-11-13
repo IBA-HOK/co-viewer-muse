@@ -957,12 +957,17 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         case 'NAME_UPDATE': {
           if (!isHost) break;
+          const nextName = msg.name.trim();
+          // An empty nickname is not a valid rename: ignore it entirely so the
+          // participant name, Controller memory and broadcast stay untouched
+          // (also covers old clients and direct messages).
+          if (!nextName) break;
           const oldParticipant = participantsRef.current.find(
             (p) => p.peerId === msg.peerId
           );
           const updated = dedupeParticipants(
             participantsRef.current.map((p) =>
-              p.peerId === msg.peerId ? { ...p, name: msg.name } : p
+              p.peerId === msg.peerId ? { ...p, name: nextName } : p
             )
           );
           const updatedParticipant = updated.find(
@@ -1309,7 +1314,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const onGuestJoined = useCallback(
     (peerId: string, name: string) => {
       if (!isHost) return;
-      const norm = normalizeName(name);
+      // Never key the participant/Controller memory by an empty name. A guest
+      // that joins without one gets a stable peerId-based fallback instead.
+      const fallbackName = `Guest-${peerId.slice(0, 4)}`;
+      const displayName = name.trim() || fallbackName;
+      const norm = normalizeName(displayName);
       const existingSame = participantsRef.current.find((p) => p.peerId === peerId);
       if (existingSame && normalizeName(existingSame.name) === norm) {
         return;
@@ -1325,7 +1334,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         : participantsRef.current.filter((p) => p.peerId !== peerId);
       const updated = dedupeParticipants([
         ...filtered,
-        { peerId, name, isHost: false, role },
+        { peerId, name: displayName, isHost: false, role },
       ]);
       commitParticipants(updated);
       broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
@@ -1489,7 +1498,9 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   const setMyNickname = useCallback(
     (name: string) => {
-      const selfName = isHost ? `${name} (Host)` : name;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const selfName = isHost ? `${trimmed} (Host)` : trimmed;
       const updated = dedupeParticipants(
         participantsRef.current.map((p) =>
           p.peerId === myId ? { ...p, name: selfName } : p
@@ -1499,7 +1510,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (isHost) {
         broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
       } else {
-        broadcast({ type: 'NAME_UPDATE', peerId: myId ?? '', name, senderId: myId ?? '' });
+        broadcast({ type: 'NAME_UPDATE', peerId: myId ?? '', name: trimmed, senderId: myId ?? '' });
       }
     },
     [broadcast, commitParticipants, isHost, myId]

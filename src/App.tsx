@@ -61,12 +61,23 @@ export default function App() {
     () => {
       try {
         const saved = localStorage.getItem('co-viewer:nickname');
-        if (saved) return saved;
+        if (saved && saved.trim()) return saved;
       } catch {
       }
       return `Guest-${Math.random().toString(36).slice(2, 6)}`;
     }
   );
+  // Keep the last non-empty name so clearing the input (select-all + delete)
+  // cannot commit an empty display name. Blur restores this value.
+  const lastValidNicknameRef = useRef(nickname);
+  useEffect(() => {
+    const trimmed = nickname.trim();
+    if (trimmed) lastValidNicknameRef.current = trimmed;
+  }, [nickname]);
+  // The transport and room state always use a confirmed name, so a transient
+  // empty value while editing does not blank the participant or the host's
+  // "(Host)" suffix.
+  const confirmedNickname = nickname.trim() || lastValidNicknameRef.current;
 
   useEffect(() => {
     try {
@@ -141,7 +152,7 @@ export default function App() {
 
   const peerTransport = usePeerHook({
     roomIdFromUrl,
-    displayName: nickname,
+    displayName: confirmedNickname,
     onMessage: handlePeerMessage,
     onGuestConnected: (peerId, name) => {
       if (selectedSyncTransportRef.current !== 'peerjs') return;
@@ -164,7 +175,7 @@ export default function App() {
 
   const mqttTransport = useMqttTransport({
     roomIdFromUrl,
-    displayName: nickname,
+    displayName: confirmedNickname,
     enabled: transportKind === 'mqtt',
     onMessage: handleMqttMessage,
     onGuestConnected: (peerId, name) => {
@@ -218,7 +229,7 @@ export default function App() {
     isHost: transport.isHost,
     myId: transport.myId,
     connected: transport.connected,
-    myName: nickname,
+    myName: confirmedNickname,
     broadcast: transport.broadcast,
     sendTo: transport.sendTo,
     // MQTT (bus) delivers guest commands directly to every subscriber, so the
@@ -232,6 +243,9 @@ export default function App() {
   const lastNicknameRef = useRef(nickname);
 
   useEffect(() => {
+    // An empty/whitespace-only value is not a confirmed name: keep the last
+    // valid one (blur restores it) and never broadcast it.
+    if (!nickname.trim()) return;
     // The initial nickname is already part of JOIN/self seeding; only changes
     // made from this point on need a debounced broadcast.
     if (lastNicknameRef.current === nickname) return;
@@ -837,6 +851,11 @@ export default function App() {
                 setNickname(e.target.value);
               }}
               onBlur={() => {
+                if (!nickname.trim()) {
+                  cancelNicknameBroadcast(nicknameBroadcastTimerRef);
+                  setNickname(lastValidNicknameRef.current);
+                  return;
+                }
                 flushNicknameBroadcast(
                   nicknameBroadcastTimerRef,
                   nickname,
