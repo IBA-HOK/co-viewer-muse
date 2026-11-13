@@ -143,6 +143,8 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     isPlaying: boolean;
   } | null>(null);
   const isRemoteSyncingRef = useRef(false);
+  /** Pending timer that releases the remote-sync suppression flag. */
+  const remoteSyncTimerRef = useRef<number | null>(null);
   const myNameRef = useRef(myName);
   myNameRef.current = myName;
 
@@ -444,11 +446,28 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     try {
       fn();
     } finally {
-      window.setTimeout(() => {
+      // Keep the suppression alive for 400ms after the *latest* remote command.
+      // A previous timer must not release the flag while a newer command is
+      // still being applied and before its player event has fired.
+      if (remoteSyncTimerRef.current != null) {
+        window.clearTimeout(remoteSyncTimerRef.current);
+      }
+      remoteSyncTimerRef.current = window.setTimeout(() => {
+        remoteSyncTimerRef.current = null;
         isRemoteSyncingRef.current = false;
       }, 400);
     }
   }, []);
+
+  useEffect(
+    () => () => {
+      if (remoteSyncTimerRef.current != null) {
+        window.clearTimeout(remoteSyncTimerRef.current);
+        remoteSyncTimerRef.current = null;
+      }
+    },
+    []
+  );
 
   const markRoomStateReceived = useCallback(() => {
     if (hasReceivedRoomStateRef.current) return;
