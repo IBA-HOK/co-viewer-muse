@@ -732,6 +732,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         }
         case 'SEEK': {
+          // The PeerJS star relay sends a guest's command back to the sender.
+          // The guest already seeked locally in localSeek(), so applying its
+          // own relayed SEEK would seek (and buffer) a second time.
+          if (msg.senderId === myId) break;
           if (driveModeRef.current && !isHost) break;
           const seekAt = Date.now();
           if (!isHost && msg.senderId !== myId) {
