@@ -517,3 +517,53 @@ describe('usePeer · host incoming connection timeout', () => {
     expect(conn2.close).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('usePeer · guest metadata name', () => {
+  beforeEach(() => {
+    peerMock.MockPeer.instances.length = 0;
+    vi.clearAllMocks();
+  });
+
+  it('passes an empty name when metadata.name is not a usable string', () => {
+    const opts = makeOptions(null);
+    renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const cases: Array<[string, unknown]> = [
+      ['guest-1', 123],
+      ['guest-2', {}],
+      ['guest-3', '   '],
+    ];
+    for (const [peerId, name] of cases) {
+      const conn = new peerMock.MockDataConnection(peerId, { metadata: { name } });
+      act(() => peer.emit('connection', conn));
+    }
+
+    expect(opts.onGuestConnected).toHaveBeenNthCalledWith(1, 'guest-1', '');
+    expect(opts.onGuestConnected).toHaveBeenNthCalledWith(2, 'guest-2', '');
+    expect(opts.onGuestConnected).toHaveBeenNthCalledWith(3, 'guest-3', '');
+    expect(opts.onGuestDisconnected).not.toHaveBeenCalled();
+  });
+
+  it('trims and truncates long names while keeping normal names intact', () => {
+    const opts = makeOptions(null);
+    renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const long = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: `  ${'a'.repeat(30)}  ` },
+    });
+    act(() => peer.emit('connection', long));
+    expect(opts.onGuestConnected).toHaveBeenCalledWith('guest-1', 'a'.repeat(24));
+
+    const normal = new peerMock.MockDataConnection('guest-2', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', normal));
+    expect(opts.onGuestConnected).toHaveBeenCalledWith('guest-2', 'Alice');
+  });
+});

@@ -1370,7 +1370,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       // Never key the participant/Controller memory by an empty name. A guest
       // that joins without one gets a stable peerId-based fallback instead.
       const fallbackName = `Guest-${peerId.slice(0, 4)}`;
-      const displayName = name.trim() || fallbackName;
+      // Some transports (or direct callers) may hand us a non-string name at
+      // runtime even though the type says otherwise; never call trim on it.
+      const displayName =
+        (typeof name === 'string' ? name.trim() : '') || fallbackName;
       const norm = normalizeName(displayName);
       const existingSame = participantsRef.current.find((p) => p.peerId === peerId);
       if (existingSame && normalizeName(existingSame.name) === norm) {

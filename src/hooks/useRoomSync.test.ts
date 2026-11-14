@@ -1203,3 +1203,47 @@ describe('useRoomSync · host guest-command relay', () => {
     expect(broadcast).toHaveBeenCalledWith(guestSeek);
   });
 });
+
+describe('useRoomSync · onGuestJoined name guard', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('falls back to a Guest- name instead of throwing on non-string input', () => {
+    const { result } = mountHost(makeController());
+
+    const cases: Array<[string, unknown]> = [
+      ['alpha-1', 123],
+      ['bravo-2', {}],
+      ['charlie-3', '   '],
+    ];
+    for (const [peerId, name] of cases) {
+      act(() => {
+        result.current.onGuestJoined(peerId, name as string);
+      });
+    }
+
+    for (const [peerId] of cases) {
+      const guest = result.current.participants.find((p) => p.peerId === peerId);
+      expect(guest).toBeDefined();
+      expect(guest!.name.startsWith('Guest-')).toBe(true);
+    }
+  });
+
+  it('keeps normal string names unchanged', () => {
+    const { result } = mountHost(makeController());
+
+    act(() => {
+      result.current.onGuestJoined('peer-a', 'Alice');
+    });
+
+    expect(
+      result.current.participants.find((p) => p.peerId === 'peer-a')?.name
+    ).toBe('Alice');
+  });
+});

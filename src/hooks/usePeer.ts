@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Peer from 'peerjs';
 import type { DataConnection, MediaConnection } from 'peerjs';
-import { isValidSyncMessage, type SyncMessage } from '../types';
+import { isValidSyncMessage, MAX_CHAT_NAME_LENGTH, type SyncMessage } from '../types';
 import type { TransportTopology } from '../transport/types';
 
 export interface UsePeerOptions {
@@ -435,7 +435,14 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
             /* noop */
           }
         }
-        const name = (conn.metadata?.name as string) ?? 'Guest';
+        // metadata is set by the connecting peer and may be any JSON value.
+        // Only a string is a usable name; everything else (and an empty name)
+        // is passed as '' so onGuestJoined applies its Guest-xxxx fallback.
+        const rawName = conn.metadata?.name;
+        const name =
+          typeof rawName === 'string'
+            ? rawName.trim().slice(0, MAX_CHAT_NAME_LENGTH)
+            : '';
         const fireOnce = (): void => {
           if (guestJoinedFiredRef.current.has(conn.peer)) return;
           guestJoinedFiredRef.current.add(conn.peer);
