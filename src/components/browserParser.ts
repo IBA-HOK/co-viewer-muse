@@ -69,10 +69,35 @@ function extractYtInitialData(html: string): unknown {
   }
 }
 
+const JP_UNITS: Record<string, number> = {
+  万: 1e4,
+  億: 1e8,
+  兆: 1e12,
+};
+
 function parseCount(text: string | undefined): number | undefined {
   if (!text) return undefined;
   const m = text.match(/[\d.,]+/);
-  if (!m) return undefined;
+  if (!m || m.index === undefined) return undefined;
+
+  // Japanese counts can repeat across units (e.g. "1億2,345万"). Scan the
+  // number/unit chunk starting at the first number and add each component.
+  let end = m.index;
+  while (end < text.length && /[\d.,万億兆]/.test(text[end])) end++;
+  const chunk = text.slice(m.index, end);
+  let jpTotal = 0;
+  let hasJpUnit = false;
+  const partRe = /([\d.,]+)([万億兆])?/g;
+  let part: RegExpExecArray | null;
+  while ((part = partRe.exec(chunk)) !== null) {
+    const n = parseFloat(part[1].replace(/,/g, ''));
+    const unit = part[2];
+    if (unit) hasJpUnit = true;
+    const multiplier = unit ? JP_UNITS[unit] : 1;
+    jpTotal += n * multiplier;
+  }
+  if (hasJpUnit) return Number.isFinite(jpTotal) ? jpTotal : undefined;
+
   let n = parseFloat(m[0].replace(/,/g, ''));
   if (/K/i.test(text)) n *= 1e3;
   else if (/M/i.test(text)) n *= 1e6;

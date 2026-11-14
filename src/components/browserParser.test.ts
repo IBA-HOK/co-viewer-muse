@@ -34,6 +34,55 @@ describe('extractYouTubeResults', () => {
   });
 });
 
+describe('extractYouTubeResults view counts', () => {
+  const makeHtml = (viewsTexts: (string | undefined)[]): string =>
+    `<script>ytInitialData = ${JSON.stringify({
+      contents: viewsTexts.map((text, i) => ({
+        videoRenderer: {
+          videoId: `vc-${i}`,
+          title: { runs: [{ text: `Video ${i}` }] },
+          thumbnail: { thumbnails: [{ url: `https://i.ytimg.com/vi/vc-${i}/hq720.jpg` }] },
+          ...(text === undefined ? {} : { viewCountText: { simpleText: text } }),
+        },
+      })),
+    })};</script>`;
+
+  it('parses Japanese 万 / 億 / compound units and keeps English/canonical forms', () => {
+    const r = extractYouTubeResults(
+      makeHtml([
+        '1.2万回視聴',
+        '12万回視聴',
+        '1億回視聴',
+        '1億2,345万回視聴',
+        '1.2K views',
+        '1,234 views',
+        undefined,
+      ])
+    );
+    expect(r.map((x) => x.views)).toEqual([
+      12000,
+      120000,
+      100000000,
+      123450000,
+      1200,
+      1234,
+      undefined,
+    ]);
+  });
+
+  it('sorts Japanese view counts in descending order', () => {
+    const results = extractYouTubeResults(
+      makeHtml(['12万回視聴', '1.2万回視聴', '1億2,345万回視聴', '1億回視聴'])
+    );
+    expect(sortResults(results, 'views').map((x) => x.id)).toEqual([
+      'vc-2',
+      'vc-3',
+      'vc-0',
+      'vc-1',
+    ]);
+  });
+});
+
 describe('extractNicoResults', () => {
   it('extracts id, decoded title, and unescaped thumbnail url', () => {
     const r = extractNicoResults(NICO_HTML);
