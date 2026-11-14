@@ -994,11 +994,27 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         case 'NAME_UPDATE': {
           if (!isHost) break;
+          // Only the sender may rename itself. Without this check any peer
+          // could rename another participant by putting a different peerId in
+          // the message.
+          if (msg.peerId !== fromPeerId) break;
           const nextName = msg.name.trim();
           // An empty nickname is not a valid rename: ignore it entirely so the
           // participant name, Controller memory and broadcast stay untouched
           // (also covers old clients and direct messages).
           if (!nextName) break;
+          const nextNorm = normalizeName(nextName);
+          // Reject a name already used by another participant. Renaming would
+          // otherwise duplicate the display name and overwrite/drop the other
+          // participant's Controller memory.
+          if (
+            participantsRef.current.some(
+              (p) =>
+                p.peerId !== msg.peerId && normalizeName(p.name) === nextNorm
+            )
+          ) {
+            break;
+          }
           const oldParticipant = participantsRef.current.find(
             (p) => p.peerId === msg.peerId
           );
