@@ -27,6 +27,16 @@ function loadJSON<T>(key: string, fallback: T): T {
   }
 }
 
+function loadBookmarks(): string[] {
+  const value = loadJSON<unknown>(BOOKMARKS_KEY, []);
+  if (!Array.isArray(value)) return [];
+  const normalized = value
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+  return Array.from(new Set(normalized)).slice(0, 50);
+}
+
 export default function BrowserPanel({ onAddToQueue, canQueue = true }: BrowserPanelProps) {
   const [expanded, setExpanded] = useState(() => {
     try {
@@ -46,9 +56,7 @@ export default function BrowserPanel({ onAddToQueue, canQueue = true }: BrowserP
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [bookmarks, setBookmarks] = useState<string[]>(() =>
-    loadJSON<string[]>(BOOKMARKS_KEY, [])
-  );
+  const [bookmarks, setBookmarks] = useState<string[]>(() => loadBookmarks());
   const [sort, setSort] = useState<SortKey>('relevance');
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
