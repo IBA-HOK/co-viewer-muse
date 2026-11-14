@@ -150,29 +150,8 @@ export default function App() {
     roomSyncRef.current?.handleIncoming(msg, fromPeerId);
   }, []);
 
-  const peerTransport = usePeerHook({
-    roomIdFromUrl,
-    displayName: confirmedNickname,
-    onMessage: handlePeerMessage,
-    onGuestConnected: (peerId, name) => {
-      if (selectedSyncTransportRef.current !== 'peerjs') return;
-      roomSyncRef.current?.onGuestJoined(peerId, name);
-    },
-    onGuestDisconnected: (peerId) => {
-      if (selectedSyncTransportRef.current !== 'peerjs') return;
-      roomSyncRef.current?.onGuestLeft(peerId);
-    },
-    onHostDisconnected: () => {
-      if (selectedSyncTransportRef.current !== 'peerjs') return;
-      roomSyncRef.current?.onHostLost();
-    },
-    onConnected: (host) => {
-      if (host) return;
-      if (selectedSyncTransportRef.current !== 'peerjs') return;
-      roomSyncRef.current?.onGuestReady();
-    },
-  });
-
+  // Initialize MQTT before PeerJS: in MQTT mode the PeerJS id is the MQTT
+  // transport id, so sync, presence and voice all share one participant id.
   const mqttTransport = useMqttTransport({
     roomIdFromUrl,
     displayName: confirmedNickname,
@@ -199,6 +178,32 @@ export default function App() {
       if (selectedSyncTransportRef.current !== 'mqtt') {
         if (transportKind !== 'mqtt' || mqttFallbackRef.current) return;
       }
+      roomSyncRef.current?.onGuestReady();
+    },
+  });
+
+  const peerTransport = usePeerHook({
+    roomIdFromUrl,
+    // MQTT mode keeps PeerJS only for voice. Reusing the MQTT id makes
+    // roomSync.myId/vcPeers and the PeerJS call/call-receive ids identical.
+    peerId: transportKind === 'mqtt' ? mqttTransport.myId ?? undefined : undefined,
+    displayName: confirmedNickname,
+    onMessage: handlePeerMessage,
+    onGuestConnected: (peerId, name) => {
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
+      roomSyncRef.current?.onGuestJoined(peerId, name);
+    },
+    onGuestDisconnected: (peerId) => {
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
+      roomSyncRef.current?.onGuestLeft(peerId);
+    },
+    onHostDisconnected: () => {
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
+      roomSyncRef.current?.onHostLost();
+    },
+    onConnected: (host) => {
+      if (host) return;
+      if (selectedSyncTransportRef.current !== 'peerjs') return;
       roomSyncRef.current?.onGuestReady();
     },
   });

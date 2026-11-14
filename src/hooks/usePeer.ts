@@ -6,6 +6,12 @@ import type { TransportTopology } from '../transport/types';
 
 export interface UsePeerOptions {
   roomIdFromUrl: string | null;
+  /**
+   * Explicit PeerJS id. MQTT mode passes the transport's sync id so the same
+   * value identifies a participant for sync, presence, voice and PeerJS.
+   * Omit it for PeerJS mode (the server assigns a random id as before).
+   */
+  peerId?: string;
   displayName: string;
   onMessage: (msg: SyncMessage, fromPeerId: string) => void;
   onGuestConnected: (peerId: string, name: string) => void;
@@ -37,6 +43,17 @@ export const RECONNECT_MAX_MS = 30000;
 
 /** Bounded retry queue size per peer — prevents unbounded growth on host cutoff / IP change. */
 export const MAX_QUEUE = 64;
+
+/**
+ * PeerJS's own id validation. An explicit id must satisfy this or the Peer
+ * constructor aborts with `invalid-id`, so anything else falls back to the
+ * server-assigned id instead of breaking the room.
+ */
+const PEER_ID_PATTERN = /^[A-Za-z0-9]+(?:[ _-][A-Za-z0-9]+)*$/;
+
+export function isValidPeerId(id: string): boolean {
+  return PEER_ID_PATTERN.test(id);
+}
 
 /**
  * PeerJS star topology. The host owns the room (its Peer ID == room id). Guests
@@ -349,7 +366,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
     isHostRef.current = isHostMode;
     setIsHost(isHostMode);
 
-    const peer = new Peer({
+    const peerOptions = {
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
@@ -370,7 +387,15 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
           },
         ],
       },
-    });
+    };
+    const explicitPeerId = opts.peerId;
+    const hasExplicitPeerId = !!explicitPeerId && isValidPeerId(explicitPeerId);
+    if (explicitPeerId && !hasExplicitPeerId) {
+      console.warn('[usePeer] invalid explicit peer id — using a server-assigned id');
+    }
+    const peer = hasExplicitPeerId
+      ? new Peer(explicitPeerId, peerOptions)
+      : new Peer(peerOptions);
     peerRef.current = peer;
 
       peer.on('open', (id) => {

@@ -61,8 +61,10 @@ const peerMock = vi.hoisted(() => {
     connections: MockDataConnection[] = [];
     reconnect = vi.fn();
     destroy = vi.fn();
+    constructorArgs: unknown[];
 
-    constructor() {
+    constructor(...args: unknown[]) {
+      this.constructorArgs = args;
       MockPeer.instances.push(this);
     }
 
@@ -120,6 +122,64 @@ describe('usePeer · topology', () => {
     const { result } = renderHook(() => usePeer(makeOptions('room-1')));
 
     expect(result.current.topology).toBe('star');
+  });
+});
+
+describe('usePeer · explicit peer id', () => {
+  beforeEach(() => {
+    peerMock.MockPeer.instances.length = 0;
+    vi.clearAllMocks();
+  });
+
+  it('uses the explicit id for the Peer constructor and the host room id', () => {
+    const opts = { ...makeOptions(null), peerId: 'co-viewer-abc-123' };
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    expect(peer.constructorArgs[0]).toBe('co-viewer-abc-123');
+    expect(peer.constructorArgs[1]).toMatchObject({
+      config: expect.objectContaining({ iceServers: expect.any(Array) }),
+    });
+
+    act(() => peer.emit('open', 'co-viewer-abc-123'));
+
+    expect(result.current.myId).toBe('co-viewer-abc-123');
+    expect(result.current.roomId).toBe('co-viewer-abc-123');
+  });
+
+  it('keeps the explicit id for a guest while joining the URL room', () => {
+    const opts = { ...makeOptions('url-room'), peerId: 'co-viewer-guest-1' };
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    expect(peer.constructorArgs[0]).toBe('co-viewer-guest-1');
+
+    act(() => peer.emit('open', 'co-viewer-guest-1'));
+
+    expect(result.current.myId).toBe('co-viewer-guest-1');
+    expect(result.current.roomId).toBe('url-room');
+    expect(peer.connect).toHaveBeenCalledWith('url-room', expect.anything());
+  });
+
+  it('falls back to a server-assigned id when the explicit id is invalid', () => {
+    const opts = { ...makeOptions(null), peerId: 'not a valid id!' };
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    // No explicit id argument: Peer asks the server for a random id.
+    expect(typeof peer.constructorArgs[0]).toBe('object');
+
+    act(() => peer.emit('open', 'server-assigned'));
+
+    expect(result.current.myId).toBe('server-assigned');
+    expect(result.current.roomId).toBe('server-assigned');
+  });
+
+  it('omits the explicit id argument when no peerId is supplied', () => {
+    renderHook(() => usePeer(makeOptions(null)));
+
+    const peer = peerMock.MockPeer.instances[0];
+    expect(typeof peer.constructorArgs[0]).toBe('object');
   });
 });
 
