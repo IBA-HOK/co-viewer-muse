@@ -180,6 +180,7 @@ export function useNiconicoPlayer(
   const bufferingRef = useRef(false);
   const pendingSeekRef = useRef<number | null>(null);
   const shouldPlayRef = useRef(false);
+  const desiredVolumeRef = useRef(100); // percent, 0..100
   const loadedVideoIdRef = useRef<string | null>(null);
   const lowBandwidthRef = useRef(false);
   const [lowBandwidthMode, setLowBandwidthModeState] = useState(false);
@@ -233,6 +234,12 @@ export function useNiconicoPlayer(
             postCommand(iframe, playerIdRef.current, 'play');
             shouldPlayRef.current = false;
           }
+          // The iframe (and its embed player) is recreated on every load, which
+          // resets volume to the default. Re-apply the desired volume after the
+          // handshake so early setVolume calls (and subsequent loads) stick.
+          postCommand(iframe, playerIdRef.current, 'volumeChange', {
+            volume: desiredVolumeRef.current / 100,
+          });
           break;
         case 'playerStatusChange': {
           const status = Number(data.data?.playerStatus);
@@ -334,9 +341,12 @@ export function useNiconicoPlayer(
   const isBuffering = useCallback(() => bufferingRef.current, []);
   const setVolume = useCallback((volume: number) => {
     const v = Math.max(0, Math.min(100, Math.round(volume)));
+    // Remember the desired value so it can be re-applied when the embed
+    // completes loading (including after switching videos).
+    desiredVolumeRef.current = v;
     postCommand(iframeRef.current, playerIdRef.current, 'volumeChange', { volume: v / 100 });
   }, []);
-  const getVolume = useCallback(() => 100, []);
+  const getVolume = useCallback(() => desiredVolumeRef.current, []);
 
   /**
    * Best-effort low-bandwidth hint. Today this only flips an internal flag so
