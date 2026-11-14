@@ -103,6 +103,149 @@ export type SyncMessage =
       senderId: string;
     };
 
+const PLATFORMS: readonly Platform[] = ['youtube', 'niconico'];
+const ROLES: readonly Role[] = ['Host', 'Controller', 'Viewer'];
+
+/** Maximum chat text/name lengths accepted from remote peers. */
+export const MAX_CHAT_TEXT_LENGTH = 500;
+export const MAX_CHAT_NAME_LENGTH = 24;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isPlatform(value: unknown): value is Platform {
+  return PLATFORMS.includes(value as Platform);
+}
+
+function isRole(value: unknown): value is Role {
+  return ROLES.includes(value as Role);
+}
+
+function isParticipant(value: unknown): value is Participant {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.peerId === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.isHost === 'boolean' &&
+    isRole(value.role)
+  );
+}
+
+function isQueueItem(value: unknown): value is QueueItem {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === 'string' &&
+    isPlatform(value.platform) &&
+    typeof value.videoId === 'string' &&
+    typeof value.addedBy === 'string'
+  );
+}
+
+function isQueue(value: unknown): value is QueueItem[] {
+  return Array.isArray(value) && value.every(isQueueItem);
+}
+
+function isParticipants(value: unknown): value is Participant[] {
+  return Array.isArray(value) && value.every(isParticipant);
+}
+
+/**
+ * Runtime validation for messages received from untrusted transports (MQTT is
+ * a public broker, and PeerJS data can be sent by any connected peer). A
+ * message may carry extra fields, but every field required by its type must be
+ * present and correctly typed. Optional fields, when specified, are validated
+ * as well.
+ */
+export function isValidSyncMessage(value: unknown): value is SyncMessage {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+
+  switch (value.type) {
+    case 'PLAY':
+    case 'PAUSE':
+    case 'SEEK':
+      return (
+        typeof value.senderId === 'string' && isFiniteNumber(value.currentTime)
+      );
+    case 'SYNC_PING':
+      return (
+        typeof value.senderId === 'string' &&
+        isFiniteNumber(value.currentTime) &&
+        typeof value.isPlaying === 'boolean' &&
+        (value.sentAt === undefined || isFiniteNumber(value.sentAt))
+      );
+    case 'ROLE_UPDATE':
+      return (
+        typeof value.targetPeerId === 'string' &&
+        isRole(value.role) &&
+        typeof value.senderId === 'string'
+      );
+    case 'PARTICIPANTS':
+      return (
+        isParticipants(value.participants) &&
+        typeof value.senderId === 'string'
+      );
+    case 'REQUEST_STATE':
+      return typeof value.senderId === 'string';
+    case 'QUEUE_UPDATE':
+      return (
+        isQueue(value.queue) &&
+        (value.currentId === null || typeof value.currentId === 'string') &&
+        isFiniteNumber(value.currentTime) &&
+        (value.restart === undefined || typeof value.restart === 'boolean') &&
+        typeof value.senderId === 'string'
+      );
+    case 'STATE_SNAPSHOT':
+      return (
+        isPlatform(value.platform) &&
+        typeof value.videoId === 'string' &&
+        isFiniteNumber(value.currentTime) &&
+        typeof value.isPlaying === 'boolean' &&
+        isQueue(value.queue) &&
+        (value.currentId === null || typeof value.currentId === 'string') &&
+        typeof value.senderId === 'string'
+      );
+    case 'NAME_UPDATE':
+      return (
+        typeof value.peerId === 'string' &&
+        typeof value.name === 'string' &&
+        typeof value.senderId === 'string'
+      );
+    case 'VC_STATE':
+      return (
+        typeof value.active === 'boolean' && typeof value.senderId === 'string'
+      );
+    case 'VC_PEER':
+      return (
+        typeof value.peerId === 'string' &&
+        typeof value.inVc === 'boolean' &&
+        typeof value.senderId === 'string'
+      );
+    case 'DRIVE_MODE':
+      return (
+        typeof value.enabled === 'boolean' &&
+        typeof value.audioOnly === 'boolean' &&
+        typeof value.senderId === 'string'
+      );
+    case 'CHAT_MESSAGE':
+      return (
+        typeof value.peerId === 'string' &&
+        typeof value.name === 'string' &&
+        typeof value.text === 'string' &&
+        isFiniteNumber(value.timestamp) &&
+        typeof value.senderId === 'string' &&
+        value.text.length <= MAX_CHAT_TEXT_LENGTH &&
+        value.name.length <= MAX_CHAT_NAME_LENGTH
+      );
+    default:
+      return false;
+  }
+}
+
 /** Local player state changes detected by a platform hook (emitted for broadcast). */
 export type LocalPlayerEvent =
   | { kind: 'PLAY'; currentTime: number }

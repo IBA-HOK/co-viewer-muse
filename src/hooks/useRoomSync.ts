@@ -11,6 +11,7 @@ import {
   type QueueItem,
   type Role,
   type SyncMessage,
+  isValidSyncMessage,
 } from '../types';
 import { fetchTitle } from '../titleFetcher';
 import {
@@ -695,6 +696,9 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   const handleIncoming = useCallback(
     (msg: SyncMessage, fromPeerId: string) => {
+      // Transports can deliver untrusted JSON (MQTT is a public broker), so a
+      // malformed message must be dropped before it mutates any room state.
+      if (!isValidSyncMessage(msg)) return;
       const senderId = myId ?? '';
       switch (msg.type) {
         case 'PLAY': {

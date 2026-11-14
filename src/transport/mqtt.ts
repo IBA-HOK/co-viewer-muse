@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import mqtt, { type MqttClient } from 'mqtt';
-import type { SyncMessage } from '../types';
+import { isValidSyncMessage, type SyncMessage } from '../types';
 import type { Transport, TransportOptions } from './types';
 import { getMqttBrokerUrl } from './types';
 
@@ -33,14 +33,6 @@ function resolvePublishTarget(
   }
   const qos: 0 | 1 = msg.type === 'SYNC_PING' ? 0 : 1;
   return { topic: syncTopic(roomId), qos, retain: false };
-}
-
-function isSyncMessage(value: unknown): value is SyncMessage {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { type?: unknown }).type === 'string'
-  );
 }
 
 interface PresenceMessage {
@@ -237,7 +229,7 @@ export function useMqttTransport(opts: TransportOptions): Transport {
           handlePresence(parsed);
           return;
         }
-        if (!isSyncMessage(parsed)) return;
+        if (!isValidSyncMessage(parsed)) return;
         if (parsed.senderId === myIdRef.current) return;
         cbRef.current.onMessage(parsed, parsed.senderId ?? 'unknown');
       } catch {

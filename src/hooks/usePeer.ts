@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Peer from 'peerjs';
 import type { DataConnection, MediaConnection } from 'peerjs';
-import type { SyncMessage } from '../types';
+import { isValidSyncMessage, type SyncMessage } from '../types';
 import type { TransportTopology } from '../transport/types';
 
 export interface UsePeerOptions {
@@ -232,7 +232,10 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
 
       conn.on('data', (data) => {
         if (!isCurrentConn()) return;
-        cbRef.current.onMessage(data as SyncMessage, conn.peer);
+        // A connected peer can send arbitrary data; never forward malformed
+        // messages to the room sync layer.
+        if (!isValidSyncMessage(data)) return;
+        cbRef.current.onMessage(data, conn.peer);
       });
       conn.on('open', () => {
         if (!isCurrentConn()) return;

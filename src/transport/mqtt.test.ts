@@ -262,6 +262,51 @@ describe('useMqttTransport', () => {
     expect(onMessage).not.toHaveBeenCalled();
   });
 
+  it('does not forward JSON that has a known type but invalid required fields', () => {
+    const onMessage = vi.fn();
+    renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: null,
+        displayName: 'Host',
+        onMessage,
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected: vi.fn(),
+      })
+    );
+
+    const client = getMockClient();
+    const handler = getOnHandler(client, 'message');
+    expect(handler).not.toBeNull();
+
+    act(() => {
+      handler?.(
+        'co-viewer/room/state',
+        Buffer.from(JSON.stringify({ type: 'QUEUE_UPDATE', senderId: 'other-peer' }))
+      );
+      handler?.(
+        'co-viewer/room/sync',
+        Buffer.from(JSON.stringify({ type: 'PARTICIPANTS', senderId: 'other-peer' }))
+      );
+      handler?.(
+        'co-viewer/room/sync',
+        Buffer.from(
+          JSON.stringify({
+            type: 'CHAT_MESSAGE',
+            peerId: 'other-peer',
+            name: 'Other',
+            text: 42,
+            timestamp: 1,
+            senderId: 'other-peer',
+          })
+        )
+      );
+    });
+
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
   it('valid JSON with type forwards to onMessage', () => {
     const onMessage = vi.fn();
     const { result } = renderHook(() =>
