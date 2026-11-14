@@ -225,6 +225,12 @@ export default function BrowserPanel({ onAddToQueue, canQueue = true }: BrowserP
   const switchEngine = (next: 'youtube' | 'nico') => {
     if (next === engine) return;
     cancelPendingSearches();
+    // Drop results rendered by the previous engine as well: aborting in-flight
+    // requests does not remove cards, errors, or queue animations already on
+    // screen. Bookmarks, the query, sort order, and expansion are preserved.
+    setResults([]);
+    setError(null);
+    setAnimStates({});
     setEngine(next);
   };
 
