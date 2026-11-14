@@ -963,11 +963,24 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           break;
         }
         case 'DRIVE_MODE': {
+          // Update the ref synchronously: DRIVE_MODE(true) and (false) can
+          // arrive in the same tick, before React commits the state effect.
+          const wasDriveMode = driveModeRef.current;
+          driveModeRef.current = msg.enabled;
           setDriveModeState(msg.enabled);
           setDriveAudioOnlyState(msg.audioOnly);
           // The video player is hidden/torn down for drive-mode guests, so a
           // pending fallback state must not survive the mode switch.
-          if (!isHost) resetDriftGuard(false);
+          if (!isHost) {
+            resetDriftGuard(false);
+            if (wasDriveMode && !msg.enabled) {
+              // A QUEUE_UPDATE received while driving only recorded a pending
+              // snapshot. That position is stale by the time the player mounts
+              // again, so drop it and ask the host for the current state.
+              pendingSnapshotRef.current = null;
+              broadcast({ type: 'REQUEST_STATE', senderId });
+            }
+          }
           break;
         }
         case 'ROLE_UPDATE':
