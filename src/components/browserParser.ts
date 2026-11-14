@@ -344,10 +344,6 @@ function raceSignal(outer?: AbortSignal, timeoutMs = 4000): AbortController {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const onOuterAbort = () => ctrl.abort();
-  if (outer) {
-    if (outer.aborted) ctrl.abort();
-    else outer.addEventListener('abort', onOuterAbort, { once: true });
-  }
   ctrl.signal.addEventListener(
     'abort',
     () => {
@@ -356,7 +352,18 @@ function raceSignal(outer?: AbortSignal, timeoutMs = 4000): AbortController {
     },
     { once: true }
   );
+  if (outer) {
+    if (outer.aborted) ctrl.abort();
+    else outer.addEventListener('abort', onOuterAbort, { once: true });
+  }
   return ctrl;
+}
+
+// Abort every controller in a race once a winner (or all-failed outcome) is
+// known. The winner's response body has already been consumed by then, so
+// aborting its controller only cancels network work that no longer matters.
+function abortAll(controllers: AbortController[]): void {
+  for (const ctrl of controllers) ctrl.abort();
 }
 
 // Resolve with the first fulfilling promise (Promise.any without requiring the
@@ -433,8 +440,10 @@ async function fetchText(
   signal?: AbortSignal,
   timeoutMs = 6000
 ): Promise<string | null> {
+  const controllers: AbortController[] = [];
   const attempts = PROXIES.map((make) => {
     const ctrl = raceSignal(signal, timeoutMs);
+    controllers.push(ctrl);
     return fetch(make(target), { signal: ctrl.signal })
       .then((res) => {
         if (!res.ok) throw new Error('bad status');
@@ -449,6 +458,8 @@ async function fetchText(
     return await firstFulfilled(attempts);
   } catch {
     return null;
+  } finally {
+    abortAll(controllers);
   }
 }
 
@@ -464,8 +475,10 @@ async function fetchYouTube(query: string, signal?: AbortSignal, page = 1): Prom
   // Race every Invidious instance in parallel; take the first that returns
   // usable results. Each attempt has its own 4s timeout, so a slow/dead
   // instance is dropped instead of blocking the search.
+  const invidiousControllers: AbortController[] = [];
   const attempts = INVIDIOUS_INSTANCES.map((inst) => {
     const ctrl = raceSignal(signal, 4000);
+    invidiousControllers.push(ctrl);
     return fetch(`${inst}/api/v1/search?q=${q}&type=video&page=${page}`, { signal: ctrl.signal })
       .then((res) => {
         if (!res.ok) throw new Error('bad status');
@@ -484,6 +497,8 @@ async function fetchYouTube(query: string, signal?: AbortSignal, page = 1): Prom
     return { ok: true, results, hasMore: results.length >= PAGE_SIZE };
   } catch {
     // all Invidious instances failed/timed out — try a proxy fallback below
+  } finally {
+    abortAll(invidiousControllers);
   }
 
   // Fallback 1: direct Invidious instances may be down or CORS-blocked.
@@ -491,8 +506,10 @@ async function fetchYouTube(query: string, signal?: AbortSignal, page = 1): Prom
   // usable results (mirrors the Nico PROXIES.map pattern and keeps the
   // proxy[0]=429 / proxy[1]=200 case resilient, S1 RED).
   try {
+    const proxyControllers: AbortController[] = [];
     const attempts2 = PROXIES.map((make) => {
       const ctrl = raceSignal(signal, 5000);
+      proxyControllers.push(ctrl);
       return fetch(make(`${INVIDIOUS_INSTANCES[0]}/api/v1/search?q=${q}&type=video&page=${page}`), { signal: ctrl.signal })
         .then((res) => {
           if (!res.ok) throw new Error('bad status');
@@ -504,9 +521,13 @@ async function fetchYouTube(query: string, signal?: AbortSignal, page = 1): Prom
           return results;
         });
     });
-    const results = await firstFulfilled(attempts2);
-    setCached(query, page, results);
-    return { ok: true, results, hasMore: results.length >= PAGE_SIZE };
+    try {
+      const results = await firstFulfilled(attempts2);
+      setCached(query, page, results);
+      return { ok: true, results, hasMore: results.length >= PAGE_SIZE };
+    } finally {
+      abortAll(proxyControllers);
+    }
   } catch {
     // fall through to HTML scrape
   }
@@ -537,8 +558,10 @@ async function fetchNico(query: string, signal?: AbortSignal, page = 1): Promise
   // Race every proxy in parallel; take the first that returns usable JSON.
   // Each attempt has its own 4s timeout, so a slow/dead proxy is dropped
   // instead of blocking the search (mirrors the YouTube Invidious path).
+  const controllers: AbortController[] = [];
   const attempts = PROXIES.map((make) => {
     const ctrl = raceSignal(signal, 4000);
+    controllers.push(ctrl);
     return fetch(make(url), { signal: ctrl.signal })
       .then((res) => {
         if (!res.ok) throw new Error('bad status');
@@ -557,6 +580,8 @@ async function fetchNico(query: string, signal?: AbortSignal, page = 1): Promise
     return { ok: true, results, hasMore: results.length >= PAGE_SIZE };
   } catch {
     // all proxies failed/timed out — fall through to HTML scrape
+  } finally {
+    abortAll(controllers);
   }
 
   // Fallback: scrape Nico's search HTML via proxies.

@@ -10,10 +10,6 @@ function raceSignal(outer?: AbortSignal, timeoutMs = 4000): AbortController {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const onOuterAbort = () => ctrl.abort();
-  if (outer) {
-    if (outer.aborted) ctrl.abort();
-    else outer.addEventListener('abort', onOuterAbort, { once: true });
-  }
   ctrl.signal.addEventListener(
     'abort',
     () => {
@@ -22,7 +18,15 @@ function raceSignal(outer?: AbortSignal, timeoutMs = 4000): AbortController {
     },
     { once: true }
   );
+  if (outer) {
+    if (outer.aborted) ctrl.abort();
+    else outer.addEventListener('abort', onOuterAbort, { once: true });
+  }
   return ctrl;
+}
+
+function abortAll(controllers: AbortController[]): void {
+  for (const ctrl of controllers) ctrl.abort();
 }
 
 function firstFulfilled<T>(promises: Promise<T>[]): Promise<T> {
@@ -78,8 +82,10 @@ function setCached(key: string, title: string): void {
 }
 
 async function fetchJsonViaProxies(url: string, signal?: AbortSignal): Promise<unknown> {
+  const controllers: AbortController[] = [];
   const attempts = PROXIES.map((make) => {
     const ctrl = raceSignal(signal, 4000);
+    controllers.push(ctrl);
     return fetch(make(url), { signal: ctrl.signal })
       .then((res) => {
         if (!res.ok) throw new Error('bad status');
@@ -90,18 +96,25 @@ async function fetchJsonViaProxies(url: string, signal?: AbortSignal): Promise<u
   attempts.push(
     (() => {
       const ctrl = raceSignal(signal, 3500);
+      controllers.push(ctrl);
       return fetch(url, { signal: ctrl.signal }).then((res) => {
         if (!res.ok) throw new Error('bad status');
         return res.json();
       });
     })()
   );
-  return firstFulfilled(attempts);
+  try {
+    return await firstFulfilled(attempts);
+  } finally {
+    abortAll(controllers);
+  }
 }
 
 async function fetchTextViaProxies(url: string, signal?: AbortSignal): Promise<string> {
+  const controllers: AbortController[] = [];
   const attempts = PROXIES.map((make) => {
     const ctrl = raceSignal(signal, 4500);
+    controllers.push(ctrl);
     return fetch(make(url), { signal: ctrl.signal })
       .then((res) => {
         if (!res.ok) throw new Error('bad status');
@@ -112,7 +125,11 @@ async function fetchTextViaProxies(url: string, signal?: AbortSignal): Promise<s
         return t;
       });
   });
-  return firstFulfilled(attempts);
+  try {
+    return await firstFulfilled(attempts);
+  } finally {
+    abortAll(controllers);
+  }
 }
 
 async function fetchYouTubeTitle(videoId: string, signal?: AbortSignal): Promise<string | null> {
