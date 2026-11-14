@@ -470,6 +470,73 @@ describe('useMqttTransport', () => {
     expect(onHostDisconnected).toHaveBeenCalledTimes(2);
   });
 
+  it('guest requests state when the host returns online after going offline', () => {
+    const onConnected = vi.fn();
+    const onHostDisconnected = vi.fn();
+    renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: 'host-room',
+        displayName: 'Guest',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected,
+        onConnected,
+      })
+    );
+
+    const client = getMockClient();
+    const handler = getOnHandler(client, 'message');
+    const presenceTopic = 'co-viewer/host-room/presence';
+
+    act(() => {
+      handler?.(
+        presenceTopic,
+        Buffer.from(JSON.stringify({ peerId: 'host-room', online: false }))
+      );
+      handler?.(
+        presenceTopic,
+        Buffer.from(JSON.stringify({ peerId: 'host-room', online: true }))
+      );
+      // A repeated online presence must not trigger another recovery.
+      handler?.(
+        presenceTopic,
+        Buffer.from(JSON.stringify({ peerId: 'host-room', online: true }))
+      );
+    });
+
+    expect(onHostDisconnected).toHaveBeenCalledTimes(1);
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    expect(onConnected).toHaveBeenCalledWith(false);
+  });
+
+  it('does not treat the initial host online presence as a recovery', () => {
+    const onConnected = vi.fn();
+    renderHook(() =>
+      useMqttTransport({
+        roomIdFromUrl: 'host-room',
+        displayName: 'Guest',
+        onMessage: vi.fn(),
+        onGuestConnected: vi.fn(),
+        onGuestDisconnected: vi.fn(),
+        onHostDisconnected: vi.fn(),
+        onConnected,
+      })
+    );
+
+    const client = getMockClient();
+    const handler = getOnHandler(client, 'message');
+
+    act(() => {
+      handler?.(
+        'co-viewer/host-room/presence',
+        Buffer.from(JSON.stringify({ peerId: 'host-room', online: true }))
+      );
+    });
+
+    expect(onConnected).not.toHaveBeenCalled();
+  });
+
   it('host does not call onHostDisconnected when MQTT closes', () => {
     const onHostDisconnected = vi.fn();
     renderHook(() =>

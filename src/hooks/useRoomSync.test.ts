@@ -1050,6 +1050,38 @@ describe('useRoomSync · REQUEST_STATE reconnect recovery', () => {
     expect(messages.some((m) => m.type === 'PARTICIPANTS')).toBe(true);
   });
 
+  it('restores the host and other guests in the requesting guest participants', () => {
+    const { result: host, sendTo } = mountHost(makeController());
+    act(() => {
+      host.current.onGuestJoined('guest-1', 'Guest');
+    });
+    act(() => {
+      host.current.onGuestJoined('peer-a', 'Alice');
+    });
+    act(() => {
+      host.current.onGuestJoined('peer-b', 'Bob');
+    });
+    sendTo.mockClear();
+
+    act(() => {
+      host.current.handleIncoming(
+        { type: 'REQUEST_STATE', senderId: 'guest-1' },
+        'guest-1'
+      );
+    });
+
+    const guest = mountGuest(makeController());
+    act(() => {
+      for (const call of sendTo.mock.calls) {
+        if (call[0] !== 'guest-1') continue;
+        guest.current.handleIncoming(call[1] as SyncMessage, 'host-1');
+      }
+    });
+
+    const peerIds = guest.current.participants.map((p) => p.peerId).sort();
+    expect(peerIds).toEqual(['guest-1', 'host-1', 'peer-a', 'peer-b']);
+  });
+
   it('ignores REQUEST_STATE on a guest', () => {
     const sendTo = vi.fn();
     const { result } = renderHook(() =>

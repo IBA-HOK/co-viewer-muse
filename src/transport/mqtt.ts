@@ -81,6 +81,10 @@ export function useMqttTransport(opts: TransportOptions): Transport {
   const myIdRef = useRef(myId);
   const roomIdRef = useRef<string | null>(roomId);
   const isHostRef = useRef(isHost);
+  // Set when a guest observes the host's offline presence, so the following
+  // online presence (host recovery, still with the same room id) triggers a
+  // fresh REQUEST_STATE instead of being ignored.
+  const hostWasOfflineRef = useRef(false);
 
   enabledRef.current = enabled;
   myIdRef.current = myId;
@@ -212,8 +216,16 @@ export function useMqttTransport(opts: TransportOptions): Transport {
 
       // Guests rely on the host's PARTICIPANTS updates for other guests; only
       // the host going offline (or its clean shutdown) matters here.
-      if (!parsed.online && parsed.peerId === roomIdRef.current) {
+      if (parsed.peerId !== roomIdRef.current) return;
+      if (!parsed.online) {
+        hostWasOfflineRef.current = true;
         cbRef.current.onHostDisconnected();
+      } else if (hostWasOfflineRef.current) {
+        // The host reconnected while this guest stayed connected: ask it to
+        // replay the room state so the trimmed participant list and cleared
+        // VC/drive state are restored.
+        hostWasOfflineRef.current = false;
+        cbRef.current.onConnected(false);
       }
     };
 
