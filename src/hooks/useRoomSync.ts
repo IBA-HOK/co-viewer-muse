@@ -643,11 +643,14 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
 
   /** Host time-authority ping: broadcasts current playback state to align peers. */
   const emitSyncPing = useCallback(() => {
+    const controller = controllerRef.current;
+    // No player yet: a fixed 0s/paused ping would make guests pause.
+    if (!controller) return;
     if (!shouldEmitSyncPingRef.current()) return;
     broadcast({
       type: 'SYNC_PING',
-      currentTime: controllerRef.current?.getCurrentTime() ?? 0,
-      isPlaying: controllerRef.current?.getIsPlaying() ?? false,
+      currentTime: controller.getCurrentTime(),
+      isPlaying: controller.getIsPlaying(),
       sentAt: Date.now(),
       senderId: myId ?? '',
     });
@@ -1653,17 +1656,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   useEffect(() => {
     if (!isHost || !connected || driveMode) return;
     const id = window.setInterval(() => {
-      if (!shouldEmitSyncPingRef.current()) return;
-      broadcast({
-        type: 'SYNC_PING',
-        currentTime: controllerRef.current?.getCurrentTime() ?? 0,
-        isPlaying: controllerRef.current?.getIsPlaying() ?? false,
-        sentAt: Date.now(),
-        senderId: myId ?? '',
-      });
+      emitSyncPing();
     }, SYNC_PING_INTERVAL);
     return () => window.clearInterval(id);
-  }, [isHost, connected, driveMode, broadcast, myId]);
+  }, [isHost, connected, driveMode, emitSyncPing]);
 
   // Preload next queue item's thumbnail for drive-mode buffering.
   useEffect(() => {

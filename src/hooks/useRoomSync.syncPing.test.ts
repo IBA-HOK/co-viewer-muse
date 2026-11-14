@@ -38,6 +38,23 @@ function mountHost(
   return { result, broadcast };
 }
 
+function mountHostWithoutController(shouldEmitSyncPing: () => boolean) {
+  const broadcast = vi.fn();
+  const sendTo = vi.fn();
+  const { result } = renderHook(() =>
+    useRoomSync({
+      isHost: true,
+      myId: 'host-1',
+      connected: true,
+      myName: 'Host',
+      broadcast,
+      sendTo,
+      shouldEmitSyncPing,
+    })
+  );
+  return { result, broadcast };
+}
+
 function syncPings(broadcast: ReturnType<typeof vi.fn>): SyncMessage[] {
   return broadcast.mock.calls
     .map((call) => call[0] as SyncMessage)
@@ -114,5 +131,52 @@ describe('useRoomSync · SYNC_PING emit gate', () => {
     });
 
     expect(syncPings(broadcast)).toHaveLength(0);
+  });
+
+  it('does not broadcast SYNC_PING on a media change before the controller is mounted', () => {
+    const { result, broadcast } = mountHostWithoutController(() => true);
+
+    act(() => {
+      result.current.localLoadMedia('youtube', 'abc123def45');
+    });
+
+    expect(syncPings(broadcast)).toHaveLength(0);
+    expect(
+      broadcast.mock.calls.some(
+        (call) => (call[0] as SyncMessage).type === 'QUEUE_UPDATE'
+      )
+    ).toBe(true);
+  });
+
+  it('does not broadcast periodic SYNC_PING while the controller is null', () => {
+    const { broadcast } = mountHostWithoutController(() => true);
+
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+    expect(syncPings(broadcast)).toHaveLength(0);
+  });
+
+  it('broadcasts the mounted controller state once the periodic ping fires', () => {
+    const { result, broadcast } = mountHostWithoutController(() => true);
+
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+    expect(syncPings(broadcast)).toHaveLength(0);
+
+    result.current.controllerRef.current = makeController(true);
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+
+    const pings = syncPings(broadcast);
+    expect(pings).toHaveLength(1);
+    expect(pings[0]).toMatchObject({
+      type: 'SYNC_PING',
+      currentTime: 12,
+      isPlaying: true,
+    });
   });
 });
