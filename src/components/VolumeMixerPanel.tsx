@@ -19,22 +19,46 @@ interface MixerState {
 }
 
 const MIXER_KEY = 'co-viewer:mixer';
-const DEFAULT_MIXER: MixerState = { yt: 100, nico: 100, vcMaster: 100, vcPeers: {} };
 
-function loadMixer(): MixerState {
+function defaultMixer(): MixerState {
+  return { yt: 100, nico: 100, vcMaster: 100, vcPeers: {} };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function clampVolume(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 100;
+}
+
+/** Validate an untrusted saved mixer value, falling back to defaults on bad input. */
+export function normalizeMixer(value: unknown): MixerState {
+  if (!isPlainObject(value)) return defaultMixer();
+
+  const vcPeers: Record<string, number> = {};
+  if (isPlainObject(value.vcPeers)) {
+    for (const [peerId, volume] of Object.entries(value.vcPeers)) {
+      if (typeof volume === 'number' && Number.isFinite(volume)) {
+        vcPeers[peerId] = Math.min(100, Math.max(0, volume));
+      }
+    }
+  }
+
+  return {
+    yt: clampVolume(value.yt),
+    nico: clampVolume(value.nico),
+    vcMaster: clampVolume(value.vcMaster),
+    vcPeers,
+  };
+}
+
+export function loadMixer(): MixerState {
   try {
     const raw = localStorage.getItem(MIXER_KEY);
-    if (raw) {
-      const m = JSON.parse(raw) as Partial<MixerState>;
-      return {
-        yt: typeof m.yt === 'number' ? m.yt : 100,
-        nico: typeof m.nico === 'number' ? m.nico : 100,
-        vcMaster: typeof m.vcMaster === 'number' ? m.vcMaster : 100,
-        vcPeers: m.vcPeers ?? {},
-      };
-    }
+    if (raw !== null) return normalizeMixer(JSON.parse(raw));
   } catch {}
-  return { ...DEFAULT_MIXER };
+  return defaultMixer();
 }
 
 export default function VolumeMixerPanel({ controllerRef, voiceChat, participants, currentPlatform, currentId }: VolumeMixerPanelProps) {
