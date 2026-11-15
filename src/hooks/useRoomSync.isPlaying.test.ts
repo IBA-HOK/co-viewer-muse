@@ -151,6 +151,8 @@ describe('useRoomSync · queue changes update the room playing state', () => {
       result.current.handleIncoming(snapshot(true), 'host-1');
     });
     expect(result.current.isPlaying).toBe(true);
+    vi.mocked(controller.pause).mockClear();
+    vi.mocked(controller.play).mockClear();
 
     act(() => {
       result.current.handleIncoming(
@@ -165,6 +167,23 @@ describe('useRoomSync · queue changes update the room playing state', () => {
       );
     });
 
+    expect(controller.pause).toHaveBeenCalledTimes(1);
+    expect(result.current.isPlaying).toBe(false);
+    expect(controller.play).not.toHaveBeenCalled();
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'SYNC_PING',
+          currentTime: 0,
+          isPlaying: false,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
+    });
+
+    expect(controller.play).not.toHaveBeenCalled();
     expect(result.current.isPlaying).toBe(false);
   });
 
@@ -212,6 +231,37 @@ describe('useRoomSync · queue changes update the room playing state', () => {
     });
     act(() => {
       result.current.removeFromQueue(ITEMS[1].id);
+    });
+
+    expect(result.current.isPlaying).toBe(false);
+    expect(controller.pause).not.toHaveBeenCalled();
+  });
+
+  it('does not pause the player for a drive-mode guest when QUEUE_UPDATE clears the current item', () => {
+    const controller = makeController();
+    const { result } = mount(controller, false);
+
+    act(() => {
+      result.current.handleIncoming(
+        { type: 'DRIVE_MODE', enabled: true, audioOnly: false, senderId: 'host-1' },
+        'host-1'
+      );
+      result.current.handleIncoming(snapshot(true), 'host-1');
+    });
+    vi.mocked(controller.play).mockClear();
+    vi.mocked(controller.pause).mockClear();
+
+    act(() => {
+      result.current.handleIncoming(
+        {
+          type: 'QUEUE_UPDATE',
+          queue: [],
+          currentId: null,
+          currentTime: 0,
+          senderId: 'host-1',
+        },
+        'host-1'
+      );
     });
 
     expect(result.current.isPlaying).toBe(false);

@@ -933,6 +933,13 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
             } else {
               pendingSnapshotRef.current = null;
               setPlayingState(false);
+              // The room has no current item (e.g. the host removed the last
+              // one), so a guest must stop its local player too. SYNC_PING
+              // cannot do it afterwards: currentMediaRef is null by then.
+              // Drive-mode guests leave player operation to the host.
+              if (!(driveModeRef.current && !isHost)) {
+                applyRemote(() => controllerRef.current?.pause());
+              }
             }
           }
           break;
