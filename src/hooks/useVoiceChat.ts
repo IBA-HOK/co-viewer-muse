@@ -155,6 +155,28 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
     });
   }, []);
 
+  /**
+   * Whether `call` is still the connection currently tracked for `peerId`.
+   * A reconnect/renegotiation replaces the entry, so events from the old call
+   * must not mutate state owned by the new connection.
+   */
+  const isCurrentConnection = useCallback(
+    (peerId: string, call: MediaConnection) =>
+      connectionsRef.current.get(peerId) === call,
+    []
+  );
+
+  /** Clean up only when the closing/erroring call is still the tracked one. */
+  const handleConnectionEnded = useCallback(
+    (peerId: string, call: MediaConnection) => {
+      if (!isCurrentConnection(peerId, call)) return;
+      connectionsRef.current.delete(peerId);
+      answeredRef.current.delete(peerId);
+      removeRemoteStream(peerId);
+    },
+    [isCurrentConnection, removeRemoteStream]
+  );
+
   /** RMS level (0..1) from an analyser's time-domain data. */
   const readLevel = useCallback((analyser: AnalyserNode): number => {
     const buf = new Uint8Array(analyser.fftSize);
@@ -608,17 +630,12 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
     (call: MediaConnection) => {
       if (audioCtxRef.current?.state === 'suspended') void audioCtxRef.current.resume().catch(() => {});
       connectionsRef.current.set(call.peer, call);
-      call.on('stream', (s: MediaStream) => onRemoteStream(call.peer, s));
-      call.on('close', () => {
-        connectionsRef.current.delete(call.peer);
-        answeredRef.current.delete(call.peer);
-        removeRemoteStream(call.peer);
+      call.on('stream', (s: MediaStream) => {
+        if (!isCurrentConnection(call.peer, call)) return;
+        onRemoteStream(call.peer, s);
       });
-      call.on('error', () => {
-        connectionsRef.current.delete(call.peer);
-        answeredRef.current.delete(call.peer);
-        removeRemoteStream(call.peer);
-      });
+      call.on('close', () => handleConnectionEnded(call.peer, call));
+      call.on('error', () => handleConnectionEnded(call.peer, call));
       if (
         inVcRef.current &&
         localStreamRef.current &&
@@ -633,7 +650,7 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
         }
       }
     },
-    [onRemoteStream, removeRemoteStream]
+    [onRemoteStream, isCurrentConnection, handleConnectionEnded]
   );
 
   useEffect(() => {
@@ -678,18 +695,13 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       if (isInitiator && !existing) {
         const call = peer.callPeer(peerId, localStreamRef.current!);
         if (call) {
-          call.on('stream', (s: MediaStream) => onRemoteStream(peerId, s));
-          call.on('close', () => {
-            conns.delete(peerId);
-            answeredRef.current.delete(peerId);
-            removeRemoteStream(peerId);
-          });
-          call.on('error', () => {
-            conns.delete(peerId);
-            answeredRef.current.delete(peerId);
-            removeRemoteStream(peerId);
-          });
           conns.set(peerId, call);
+          call.on('stream', (s: MediaStream) => {
+            if (conns.get(peerId) !== call) return;
+            onRemoteStream(peerId, s);
+          });
+          call.on('close', () => handleConnectionEnded(peerId, call));
+          call.on('error', () => handleConnectionEnded(peerId, call));
         }
       }
     });
@@ -701,7 +713,7 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
         removeRemoteStream(peerId);
       }
     });
-  }, [inVc, myId, vcPeers, peer, onRemoteStream, removeRemoteStream]);
+  }, [inVc, myId, vcPeers, peer, onRemoteStream, removeRemoteStream, handleConnectionEnded]);
 
   // Auto-leave if the host closes the room.
   useEffect(() => {
