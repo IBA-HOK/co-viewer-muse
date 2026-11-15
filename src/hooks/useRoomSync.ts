@@ -302,6 +302,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     if (!myId) return;
     const prevMyId = prevMyIdRef.current;
     prevMyIdRef.current = myId;
+    const myIdChanged = prevMyId !== myId;
     setParticipants((prev) => {
       let next = dedupeParticipants(prev);
       if (prevMyId && prevMyId !== myId) {
@@ -313,6 +314,12 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         next = next.filter((p) => !p.isHost || p.peerId === myId);
       }
       if (next.some((p) => p.peerId === myId)) {
+        // A guest's myName is only the (possibly still pending) rename
+        // request. Once the self entry exists, the host's PARTICIPANTS
+        // broadcast is authoritative, so a changed myName for the same id
+        // must not overwrite it. The initial seed and a transport switch
+        // (myId change) still use myName as before.
+        if (!myIdChanged) return prev;
         return next.map((p) =>
           p.peerId === myId
             ? { ...p, name: isHost ? `${myName} (Host)` : myName, isHost, role: isHost ? ('Host' as Role) : p.role }
@@ -1160,6 +1167,21 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     [applyRemote, broadcast, canControlPlaybackNow, myId, publishFallbackLevel]
   );
 
+  /**
+   * The self name that the room has confirmed. A guest's participant entry is
+   * authoritative (the host may still reject a pending rename); the nickname
+   * input value must not be used for chat or media attribution.
+   */
+  const getConfirmedSelfName = useCallback((): string => {
+    const self = participantsRef.current.find((p) => p.peerId === myId);
+    if (!self) return myNameRef.current;
+    if (!isHost) return self.name;
+    // The host's list entry carries a display-only "(Host)" suffix.
+    return self.name.endsWith(' (Host)')
+      ? self.name.slice(0, -' (Host)'.length)
+      : self.name;
+  }, [isHost, myId]);
+
   const localLoadMedia = useCallback(
     (platform: Platform, videoId: string) => {
       if (!canControlNow()) return;
@@ -1167,7 +1189,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       const exists = queueRef.current.some((q) => q.id === id);
       const nextQueue = exists
         ? queueRef.current
-        : [...queueRef.current, { id, platform, videoId, addedBy: myNameRef.current }];
+        : [...queueRef.current, { id, platform, videoId, addedBy: getConfirmedSelfName() }];
       const wasEmpty = currentIdRef.current === null;
       const wasAtTailAndStopped =
         !wasEmpty &&
@@ -1209,7 +1231,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       });
       if (isHost) emitSyncPing();
     },
-    [applyRemote, broadcast, canControlNow, commitCurrentId, commitQueue, emitSyncPing, isHost, myId, resetDriftGuard, setPlayingState]
+    [applyRemote, broadcast, canControlNow, commitCurrentId, commitQueue, emitSyncPing, getConfirmedSelfName, isHost, myId, resetDriftGuard, setPlayingState]
   );
 
   const goToItem = useCallback(
@@ -1531,10 +1553,11 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (!trimmed) return;
       const timestamp = Date.now();
       const id = `${myId}-${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+      const name = getConfirmedSelfName();
       broadcast({
         type: 'CHAT_MESSAGE',
         peerId: myId ?? '',
-        name: myNameRef.current,
+        name,
         text: trimmed,
         timestamp,
         senderId: myId ?? '',
@@ -1542,7 +1565,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       setChatState((prev) => {
         const next = [
           ...prev.messages,
-          { id, peerId: myId ?? '', name: myNameRef.current, text: trimmed, timestamp },
+          { id, peerId: myId ?? '', name, text: trimmed, timestamp },
         ];
         return {
           messages: next.length > 200 ? next.slice(next.length - 200) : next,
@@ -1550,25 +1573,29 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
         };
       });
     },
-    [broadcast, myId]
+    [broadcast, getConfirmedSelfName, myId]
   );
 
   const setMyNickname = useCallback(
     (name: string) => {
       const trimmed = name.trim();
       if (!trimmed) return;
-      const selfName = isHost ? `${trimmed} (Host)` : trimmed;
+      if (!isHost) {
+        // On a guest this is only a rename request. The host validates it
+        // (e.g. rejects a duplicate name) and the resulting PARTICIPANTS
+        // broadcast is authoritative, so the local self entry must not be
+        // updated optimistically.
+        broadcast({ type: 'NAME_UPDATE', peerId: myId ?? '', name: trimmed, senderId: myId ?? '' });
+        return;
+      }
+      const selfName = `${trimmed} (Host)`;
       const updated = dedupeParticipants(
         participantsRef.current.map((p) =>
           p.peerId === myId ? { ...p, name: selfName } : p
         )
       );
       commitParticipants(updated);
-      if (isHost) {
-        broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
-      } else {
-        broadcast({ type: 'NAME_UPDATE', peerId: myId ?? '', name: trimmed, senderId: myId ?? '' });
-      }
+      broadcast({ type: 'PARTICIPANTS', participants: updated, senderId: myId ?? '' });
     },
     [broadcast, commitParticipants, isHost, myId]
   );
