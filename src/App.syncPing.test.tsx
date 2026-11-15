@@ -190,4 +190,57 @@ describe('App · SYNC_PING while the host tab is hidden', () => {
     expect(resumed).toHaveLength(1);
     expect(resumed[0]).toMatchObject({ type: 'SYNC_PING', isPlaying: true });
   });
+
+  it('broadcasts a user PAUSE right after the tab becomes visible again', () => {
+    render(<App />);
+    expect(mocks.roomSync).not.toBeNull();
+    expect(mocks.playerProps).not.toBeNull();
+
+    act(() => {
+      mocks.roomSync!.controllerRef.current = controller;
+      mocks.roomSync!.localLoadMedia('youtube', 'abc123def45');
+    });
+    act(() => {
+      mocks.playerProps!.reportLocalEvent({ kind: 'PLAY', currentTime: 0 });
+    });
+    expect(mocks.roomSync!.isPlaying).toBe(true);
+    mocks.broadcast.mockClear();
+
+    hidden = true;
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      vi.advanceTimersByTime(100);
+    });
+
+    hidden = false;
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      vi.advanceTimersByTime(100);
+    });
+
+    // The browser was paused while hidden, but this PAUSE arrives after the
+    // tab is visible again: it is the user's intent and must be broadcast.
+    playing = false;
+    act(() => {
+      mocks.playerProps!.reportLocalEvent({ kind: 'PAUSE', currentTime: 5 });
+    });
+
+    const pauses = mocks.broadcast.mock.calls
+      .map((call) => call[0] as SyncMessage)
+      .filter((msg) => msg.type === 'PAUSE');
+    expect(pauses).toHaveLength(1);
+    expect(pauses[0]).toMatchObject({ type: 'PAUSE', currentTime: 5 });
+    expect(mocks.roomSync!.isPlaying).toBe(false);
+
+    const playCallsBefore = vi.mocked(controller.play).mock.calls.length;
+    mocks.broadcast.mockClear();
+    act(() => {
+      vi.advanceTimersByTime(6_000);
+    });
+
+    // Neither the pending visibility-return retries nor a later ping may turn
+    // the room back on.
+    expect(vi.mocked(controller.play).mock.calls.length).toBe(playCallsBefore);
+    expect(syncPings().some((ping) => ping.isPlaying)).toBe(false);
+  });
 });

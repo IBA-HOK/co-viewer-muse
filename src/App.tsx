@@ -464,8 +464,15 @@ export default function App() {
     return !!(doc.hidden || doc.webkitHidden || doc.visibilityState === 'hidden');
   }, []);
 
-  const hiddenAtRef = useRef(0);
   const bgPauseRef = useRef(false);
+  /** The window is focused; blur is treated like a background period too. */
+  const windowFocusedRef = useRef(true);
+  /** A real PAUSE (not just the tab hiding) was suppressed while hidden. */
+  const suppressedBackgroundPauseRef = useRef(false);
+  /** A tab-return resume is in flight and has not been confirmed yet. */
+  const resumePendingRef = useRef(false);
+  /** The user has interacted since the tab became visible again. */
+  const userInteractedSinceVisibleRef = useRef(false);
   const gestureResumeRef = useRef<(() => void) | null>(null);
   const gestureResumeTimerRef = useRef<number | null>(null);
   const resumeRetryRef = useRef<ResumeRetryScheduler | null>(null);
@@ -495,8 +502,28 @@ export default function App() {
     if (roomSync.isPlaying) return;
     cancelResumeRetries();
     clearGestureResume();
+    resumePendingRef.current = false;
     bgPauseRef.current = false;
+    suppressedBackgroundPauseRef.current = false;
   }, [roomSync.isPlaying, cancelResumeRetries, clearGestureResume]);
+
+  // Track genuine user activity after returning to the tab. A background PAUSE
+  // can arrive late; once the user has touched/typed, any following PAUSE is
+  // their intent and must never be swallowed by the resume window.
+  useEffect(() => {
+    const markUserInteraction = () => {
+      if (isDocumentHidden()) return;
+      userInteractedSinceVisibleRef.current = true;
+    };
+    window.addEventListener('pointerdown', markUserInteraction, true);
+    window.addEventListener('touchstart', markUserInteraction, true);
+    window.addEventListener('keydown', markUserInteraction, true);
+    return () => {
+      window.removeEventListener('pointerdown', markUserInteraction, true);
+      window.removeEventListener('touchstart', markUserInteraction, true);
+      window.removeEventListener('keydown', markUserInteraction, true);
+    };
+  }, [isDocumentHidden]);
 
   useEffect(
     () => () => {
@@ -507,17 +534,35 @@ export default function App() {
   );
 
   const isBackgroundPause = useCallback(() => {
-    if (isDocumentHidden()) return true;
-    return Date.now() - hiddenAtRef.current < 2500;
+    // While the tab/window has no focus the browser may pause on its own.
+    if (isDocumentHidden() || !windowFocusedRef.current) return true;
+    // After returning, only a PAUSE that belongs to a recovery still in
+    // progress (and before any user interaction) can be a leftover background
+    // pause. A PAUSE after user activity is always user intent.
+    return (
+      suppressedBackgroundPauseRef.current &&
+      resumePendingRef.current &&
+      !userInteractedSinceVisibleRef.current
+    );
   }, [isDocumentHidden]);
 
   const reportLocalEventWrapped = useCallback((e: import('./types').LocalPlayerEvent) => {
     if (e.kind === 'PAUSE' && isBackgroundPause()) {
       bgPauseRef.current = true;
+      suppressedBackgroundPauseRef.current = true;
       return;
     }
+    if (e.kind === 'PAUSE') {
+      // The user stopped playback after returning to the tab. Cancel any
+      // tab-return resume so it cannot start playback again behind their back.
+      cancelResumeRetries();
+      clearGestureResume();
+      resumePendingRef.current = false;
+      bgPauseRef.current = false;
+      suppressedBackgroundPauseRef.current = false;
+    }
     roomSyncRef.current?.reportLocalEvent(e);
-  }, [isBackgroundPause]);
+  }, [isBackgroundPause, cancelResumeRetries, clearGestureResume]);
 
   useEffect(() => {
     const tryResume = () => {
@@ -529,16 +574,23 @@ export default function App() {
       // A new visibility-return attempt supersedes any still-pending retries.
       cancelResumeRetries();
       clearGestureResume();
+      resumePendingRef.current = false;
 
       if (!rs.isPlaying) {
         bgPauseRef.current = false;
+        suppressedBackgroundPauseRef.current = false;
         return;
       }
       if (ctrl.getIsPlaying?.()) {
         bgPauseRef.current = false;
+        suppressedBackgroundPauseRef.current = false;
         return;
       }
 
+      // Keep pings suppressed until this attempt confirms playback. The room
+      // state alone is not enough: the local player may still be paused.
+      resumePendingRef.current = true;
+      bgPauseRef.current = true;
       resumeRetryRef.current = scheduleResumeRetries({
         isRoomPlaying: () => !!roomSyncRef.current?.isPlaying,
         isPlayerPlaying: () => !!roomSyncRef.current?.controllerRef.current?.getIsPlaying?.(),
@@ -548,15 +600,26 @@ export default function App() {
         },
         onFinished: () => {
           resumeRetryRef.current = null;
+          resumePendingRef.current = false;
           bgPauseRef.current = false;
+          const latest = roomSyncRef.current;
+          if (!latest?.isPlaying || latest.controllerRef.current?.getIsPlaying?.()) {
+            suppressedBackgroundPauseRef.current = false;
+          }
         },
       });
 
       const gestureResume = () => {
+        // Any tap/key press is an explicit user operation, even if the retry
+        // has not succeeded yet.
+        userInteractedSinceVisibleRef.current = true;
+        // Re-read the latest room/player state instead of a captured snapshot:
+        // an explicit PAUSE may have landed while this handler was pending.
         const c = roomSyncRef.current?.controllerRef.current;
         const r = roomSyncRef.current;
         if (!c || !r) return;
         if (!r.isPlaying) {
+          cancelResumeRetries();
           clearGestureResume();
           return;
         }
@@ -592,14 +655,18 @@ export default function App() {
           const ms = (navigator as unknown as { mediaSession: { setActionHandler: (a: string, h: (() => void) | null) => void } }).mediaSession;
           ms.setActionHandler('play', () => {
             bgPauseRef.current = false;
+            suppressedBackgroundPauseRef.current = false;
             try { ctrl.play(); } catch {}
           });
+          // Media-session pause/stop is an explicit user operation. Ignore it
+          // only while the page is in the background (hidden or blurred),
+          // never merely because it just became visible again.
           ms.setActionHandler('pause', () => {
-            if (isDocumentHidden() || Date.now() - hiddenAtRef.current < 2500) return;
+            if (isDocumentHidden() || !windowFocusedRef.current) return;
             try { ctrl.pause(); } catch {}
           });
           ms.setActionHandler('stop', () => {
-            if (isDocumentHidden() || Date.now() - hiddenAtRef.current < 2500) return;
+            if (isDocumentHidden() || !windowFocusedRef.current) return;
             try { ctrl.pause(); } catch {}
           });
           ms.setActionHandler('seekto', null);
@@ -607,7 +674,8 @@ export default function App() {
       } catch {}
     };
     const markHidden = () => {
-      hiddenAtRef.current = Date.now();
+      // A new hidden period starts with no user interaction after it.
+      userInteractedSinceVisibleRef.current = false;
       const rs = roomSyncRef.current;
       const ctrl = roomSyncRef.current?.controllerRef.current;
       if (rs?.isPlaying || ctrl?.getIsPlaying?.()) bgPauseRef.current = true;
@@ -632,14 +700,17 @@ export default function App() {
       }
     };
     const onPageHide = () => {
+      windowFocusedRef.current = false;
       markHidden();
     };
     const onPageShow = () => {
+      windowFocusedRef.current = true;
       window.setTimeout(markVisible, 80);
       window.setTimeout(tryResume, 400);
       window.setTimeout(tryResume, 1200);
     };
     const onFocus = () => {
+      windowFocusedRef.current = true;
       window.setTimeout(tryResume, 80);
       window.setTimeout(tryResume, 600);
     };
