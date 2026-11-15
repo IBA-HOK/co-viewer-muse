@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import { useYouTubePlayer } from '../hooks/useYouTubePlayer';
 import { useNiconicoPlayer } from '../hooks/useNiconicoPlayer';
+import { nicoThumbnailUrl } from '../nicoThumbnail';
 import { toWatchUrl, type LocalPlayerEvent, type Platform, type PlayerController, type QueueItem } from '../types';
 
 export interface PlayerProps {
@@ -190,7 +191,7 @@ export function Player(props: PlayerProps) {
     const thumb = currentItem
       ? currentItem.platform === 'youtube'
         ? `https://i.ytimg.com/vi/${currentItem.videoId}/hqdefault.jpg`
-        : `https://tn.smilevideo.jp/smile?i=${currentItem.videoId}`
+        : nicoThumbnailUrl(currentItem.videoId)
       : null;
     return (
       <div className="nothing-panel relative w-full overflow-hidden p-6 text-center">
@@ -216,7 +217,7 @@ export function Player(props: PlayerProps) {
     const thumb = currentItem
       ? currentItem.platform === 'youtube'
         ? `https://i.ytimg.com/vi/${currentItem.videoId}/hqdefault.jpg`
-        : `https://tn.smilevideo.jp/smile?i=${currentItem.videoId}`
+        : nicoThumbnailUrl(currentItem.videoId)
       : null;
     return (
       <div className="nothing-panel relative w-full overflow-hidden">

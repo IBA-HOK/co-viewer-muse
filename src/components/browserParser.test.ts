@@ -123,9 +123,9 @@ describe('extractNicoSnapshotResults', () => {
       thumbnail: 'https://nicovideo.cdn.nimg.jp/thumb/9',
       platform: 'nico',
     });
-    // missing thumbnailUrl falls back to the smilevideo thumbnail endpoint
+    // missing thumbnailUrl falls back to the niconico CDN thumbnail endpoint
     expect(r[1].id).toBe('sm123');
-    expect(r[1].thumbnail).toBe('https://tn.smilevideo.jp/smile?i=sm123');
+    expect(r[1].thumbnail).toBe('https://nicovideo.cdn.nimg.jp/thumbnails/123/123');
     expect(r[0].views).toBe(100);
     expect(r[0].published).toBe(new Date('2016-11-03T02:09:11+09:00').getTime());
     expect(r[1].views).toBeUndefined();

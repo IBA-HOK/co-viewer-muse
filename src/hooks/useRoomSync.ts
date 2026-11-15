@@ -14,6 +14,7 @@ import {
   isValidSyncMessage,
 } from '../types';
 import { fetchTitle } from '../titleFetcher';
+import { nicoThumbnailUrl } from '../nicoThumbnail';
 import {
   DriftGuard,
   effectiveDriftThreshold,
@@ -1693,7 +1694,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     const thumb =
       next.platform === 'youtube'
         ? `https://i.ytimg.com/vi/${next.videoId}/hqdefault.jpg`
-        : `https://tn.smilevideo.jp/smile?i=${next.videoId}`;
+        : nicoThumbnailUrl(next.videoId);
     const img = new Image();
     img.src = thumb;
   }, [driveMode, isHost, queue, currentId]);

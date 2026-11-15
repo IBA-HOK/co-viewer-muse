@@ -1,3 +1,5 @@
+import { nicoThumbnailUrl } from '../nicoThumbnail';
+
 export const PAGE_SIZE = 30;
 
 export interface SearchResult {
@@ -249,7 +251,7 @@ export function extractNicoSnapshotResults(json: unknown): SearchResult[] {
     const thumb =
       typeof v.thumbnailUrl === 'string' && v.thumbnailUrl
         ? v.thumbnailUrl
-        : `https://tn.smilevideo.jp/smile?i=${id}`;
+        : nicoThumbnailUrl(id);
     const views = typeof v.viewCounter === 'number' ? v.viewCounter : undefined;
     let published: number | undefined;
     if (typeof v.startTime === 'string') {
