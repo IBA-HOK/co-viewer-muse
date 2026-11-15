@@ -107,7 +107,7 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
   const lastPublishedLevelsRef = useRef<Record<string, number> | null>(null);
   const lastPublishedLocalLevelRef = useRef<number | null>(null);
   /** Serializes concurrent start attempts so getUserMedia/AudioContext are created once. */
-  const startingPromiseRef = useRef<Promise<boolean> | null>(null);
+  const startingPromiseRef = useRef<{ session: number; promise: Promise<boolean> } | null>(null);
   /** Incremented per start attempt and on leave/hostStop to cancel a pending start. */
   const startSessionRef = useRef(0);
 
@@ -477,7 +477,9 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       setError('マイクの取得に失敗しました。権限を確認してください。');
       return false;
     } finally {
-      setStarting(false);
+      // A stale attempt must not clear the flag for a newer start that is
+      // still waiting on getUserMedia.
+      if (startSessionRef.current === session) setStarting(false);
     }
   }, [applyNoiseCancel]);
 
@@ -496,13 +498,13 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
     });
   }, []);
 
-  const join = useCallback(async (): Promise<boolean> => {
-    if (inVcRef.current) return true;
+  const joinInternal = useCallback(async (): Promise<{ started: boolean; session: number }> => {
+    if (inVcRef.current) return { started: true, session: startSessionRef.current };
     const pending = startingPromiseRef.current;
-    if (pending) {
-      // A start is already waiting on getUserMedia; share it instead of
-      // acquiring a second stream / AudioContext.
-      return pending;
+    if (pending && pending.session === startSessionRef.current) {
+      // A start for the current session is already waiting on getUserMedia;
+      // share it instead of acquiring a second stream / AudioContext.
+      return { started: await pending.promise, session: pending.session };
     }
 
     startSessionRef.current += 1;
@@ -516,17 +518,24 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
       startMeter();
       return true;
     })();
-    startingPromiseRef.current = task;
+    startingPromiseRef.current = { session, promise: task };
     try {
-      return await task;
+      return { started: await task, session };
     } finally {
-      if (startingPromiseRef.current === task) startingPromiseRef.current = null;
+      if (startingPromiseRef.current?.promise === task) startingPromiseRef.current = null;
     }
   }, [ensureMedia, broadcastVcPeer, answerPending, startMeter]);
+
+  const join = useCallback(async (): Promise<boolean> => {
+    const { started } = await joinInternal();
+    return started;
+  }, [joinInternal]);
 
   const leave = useCallback(() => {
     // Invalidate any in-flight start so it cannot revive the VC after this stop.
     startSessionRef.current += 1;
+    startingPromiseRef.current = null;
+    setStarting(false);
     stopMeter();
     connectionsRef.current.forEach((call) => call.close());
     connectionsRef.current.clear();
@@ -570,13 +579,14 @@ export function useVoiceChat(opts: UseVoiceChatOptions): UseVoiceChatResult {
   const hostStart = useCallback(async () => {
     if (!isHost) return;
     setVcActive(true);
-    const started = await join();
-    if (!started) {
-      // The room must not stay LIVE when the local mic/setup failed.
+    const { started, session } = await joinInternal();
+    if (!started && startSessionRef.current === session) {
+      // The room must not stay LIVE when the local mic/setup failed. Skip this
+      // when a newer start has superseded the failed one.
       setVcActive(false);
       broadcastVcPeer(false);
     }
-  }, [isHost, setVcActive, broadcastVcPeer, join]);
+  }, [isHost, setVcActive, broadcastVcPeer, joinInternal]);
 
   const hostStop = useCallback(() => {
     if (!isHost) return;
