@@ -130,4 +130,35 @@ describe('ChatPanel', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(onSend).toHaveBeenCalledWith('via enter');
   });
+
+  it('does not send while the IME is composing (isComposing)', () => {
+    const onSend = vi.fn();
+    render(<ChatPanel messages={[]} myId="me" onSend={onSend} />);
+    const input = screen.getByPlaceholderText('MESSAGE...') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'へんかんちゅう' } });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe('へんかんちゅう');
+  });
+
+  it('does not send when Enter arrives with keyCode 229 during IME composition', () => {
+    const onSend = vi.fn();
+    render(<ChatPanel messages={[]} myId="me" onSend={onSend} />);
+    const input = screen.getByPlaceholderText('MESSAGE...') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'へんかんちゅう' } });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe('へんかんちゅう');
+  });
+
+  it('sends once and clears the input on a normal Enter', () => {
+    const onSend = vi.fn();
+    render(<ChatPanel messages={[]} myId="me" onSend={onSend} />);
+    const input = screen.getByPlaceholderText('MESSAGE...') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '確定済み' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('確定済み');
+    expect(input.value).toBe('');
+  });
 });
