@@ -77,6 +77,10 @@ export function useMqttTransport(opts: TransportOptions): Transport {
   // online presence (host recovery, still with the same room id) triggers a
   // fresh REQUEST_STATE instead of being ignored.
   const hostWasOfflineRef = useRef(false);
+  // Set once the guest has observed the host's online presence during the
+  // current broker connection, so the first online presence can prompt the
+  // guest to re-announce itself (initial connect and host recovery).
+  const hostOnlineSeenRef = useRef(false);
 
   enabledRef.current = enabled;
   myIdRef.current = myId;
@@ -170,6 +174,19 @@ export function useMqttTransport(opts: TransportOptions): Transport {
     });
     clientRef.current = client;
 
+    const publishPresence = (online: boolean) => {
+      try {
+        const payload = JSON.stringify({
+          peerId: myIdRef.current,
+          ...(online ? { name: cbRef.current.displayName } : {}),
+          online,
+        });
+        client.publish(presenceTopic(rid), payload, { qos: 1, retain: false });
+      } catch {
+        /* noop */
+      }
+    };
+
     const handleConnect = () => {
       setConnected(true);
       try {
@@ -180,17 +197,9 @@ export function useMqttTransport(opts: TransportOptions): Transport {
       } catch {
         /* noop */
       }
+      hostOnlineSeenRef.current = false;
       cbRef.current.onConnected(isHostRef.current);
-      try {
-        const presencePayload = JSON.stringify({
-          peerId: myIdRef.current,
-          name: cbRef.current.displayName,
-          online: true,
-        });
-        client.publish(presenceTopic(rid), presencePayload, { qos: 1, retain: false });
-      } catch {
-        /* noop */
-      }
+      publishPresence(true);
     };
 
     const handlePresence = (parsed: unknown) => {
@@ -210,9 +219,20 @@ export function useMqttTransport(opts: TransportOptions): Transport {
       // the host going offline (or its clean shutdown) matters here.
       if (parsed.peerId !== roomIdRef.current) return;
       if (!parsed.online) {
+        hostOnlineSeenRef.current = false;
         hostWasOfflineRef.current = true;
         cbRef.current.onHostDisconnected();
-      } else if (hostWasOfflineRef.current) {
+        return;
+      }
+
+      const firstOnlineSinceConnect = !hostOnlineSeenRef.current;
+      hostOnlineSeenRef.current = true;
+      if (firstOnlineSinceConnect) {
+        // The host may have connected after the guest's initial presence was
+        // published, so re-announce the guest to make it visible to the host.
+        publishPresence(true);
+      }
+      if (hostWasOfflineRef.current) {
         // The host reconnected while this guest stayed connected: ask it to
         // replay the room state so the trimmed participant list and cleared
         // VC/drive state are restored.
@@ -261,11 +281,7 @@ export function useMqttTransport(opts: TransportOptions): Transport {
         /* noop */
       }
       try {
-        const presencePayload = JSON.stringify({
-          peerId: myIdRef.current,
-          online: false,
-        });
-        client.publish(presenceTopic(rid), presencePayload, { qos: 1, retain: false });
+        publishPresence(false);
       } catch {
         /* noop */
       }
