@@ -157,6 +157,47 @@ describe('BrowserPanel harness', () => {
     });
   });
 
+  it('does not search on an IME composition Enter', async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        text: () => Promise.resolve(''),
+        json: () => Promise.resolve({}),
+      } as Response),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const onAdd = vi.fn();
+    render(<BrowserPanel onAddToQueue={onAdd} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'にほんご' } });
+
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it('does not queue on an IME composition Enter reported via keyCode 229', async () => {
+    const onAdd = vi.fn();
+    render(<BrowserPanel onAddToQueue={onAdd} />);
+    fireEvent.click(screen.getByText('+ OPEN'));
+    const input = screen.getByPlaceholderText('URL / ID or SEARCH KEYWORD') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { value: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+    });
+
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
   it('runSearch with direct URL calls onAddToQueue immediately', () => {
     const onAdd = vi.fn();
     render(<BrowserPanel onAddToQueue={onAdd} />);

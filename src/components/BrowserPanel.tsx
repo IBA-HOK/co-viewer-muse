@@ -311,7 +311,13 @@ export default function BrowserPanel({ onAddToQueue, canQueue = true }: BrowserP
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return;
+                // Ignore the Enter that confirms an IME composition; some
+                // browsers (notably Safari) only report it via keyCode 229.
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                runSearch();
+              }}
               placeholder="URL / ID or SEARCH KEYWORD"
               className="nothing-mono w-full border border-[var(--nothing-border)] bg-black px-3 py-2 text-sm text-[var(--nothing-text)] placeholder:text-[var(--nothing-text-faint)] outline-none focus:border-[var(--nothing-red)]"
             />
