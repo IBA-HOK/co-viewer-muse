@@ -547,6 +547,16 @@ export default function App() {
   }, [isDocumentHidden]);
 
   const reportLocalEventWrapped = useCallback((e: import('./types').LocalPlayerEvent) => {
+    if (e.kind === 'PLAY') {
+      // A visible, focused PLAY is a genuine restart (user gesture or a
+      // successful player resume). Leave the unconfirmed-resume state so the
+      // next SYNC_PING can publish isPlaying:true again.
+      if (!isDocumentHidden() && windowFocusedRef.current) {
+        resumePendingRef.current = false;
+        bgPauseRef.current = false;
+        suppressedBackgroundPauseRef.current = false;
+      }
+    }
     if (e.kind === 'PAUSE' && isBackgroundPause()) {
       bgPauseRef.current = true;
       suppressedBackgroundPauseRef.current = true;
@@ -600,12 +610,23 @@ export default function App() {
         },
         onFinished: () => {
           resumeRetryRef.current = null;
+          const latest = roomSyncRef.current;
+          const stillStopped =
+            !!latest?.isPlaying &&
+            !latest.controllerRef.current?.getIsPlaying?.();
+          if (stillStopped) {
+            // Every retry failed, but the room is still playing: the local
+            // player is stuck paused. Keep SYNC_PING suppressed (a ping would
+            // tell guests to pause) and keep treating late PAUSEs as
+            // background noise until a real PLAY confirms the resume.
+            resumePendingRef.current = true;
+            bgPauseRef.current = true;
+            suppressedBackgroundPauseRef.current = true;
+            return;
+          }
           resumePendingRef.current = false;
           bgPauseRef.current = false;
-          const latest = roomSyncRef.current;
-          if (!latest?.isPlaying || latest.controllerRef.current?.getIsPlaying?.()) {
-            suppressedBackgroundPauseRef.current = false;
-          }
+          suppressedBackgroundPauseRef.current = false;
         },
       });
 
