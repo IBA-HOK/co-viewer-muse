@@ -211,19 +211,46 @@ export function Player(props: PlayerProps) {
   }
 
   const isHostAudioOnly = !!props.driveMode && !!props.audioOnly && !!props.isHost && !!props.platform;
-  if (isHostAudioOnly) {
-    const currentItem = props.queue?.find((q) => q.id === props.currentId) ?? null;
-    const title = currentItem ? (props.titles?.[currentItem.id] ?? currentItem.videoId) : null;
-    const thumb = currentItem
-      ? currentItem.platform === 'youtube'
-        ? `https://i.ytimg.com/vi/${currentItem.videoId}/hqdefault.jpg`
-        : nicoThumbnailUrl(currentItem.videoId)
-      : null;
-    return (
-      <div className="nothing-panel relative w-full overflow-hidden">
-        <div className="nothing-glyph" aria-hidden />
-        {props.platform === 'youtube' && <YouTubeInner {...props} />}
-        {props.platform === 'niconico' && <NiconicoInner {...props} />}
+  const currentItem = isHostAudioOnly
+    ? props.queue?.find((q) => q.id === props.currentId) ?? null
+    : null;
+  const title = currentItem ? (props.titles?.[currentItem.id] ?? currentItem.videoId) : null;
+  const thumb = currentItem
+    ? currentItem.platform === 'youtube'
+      ? `https://i.ytimg.com/vi/${currentItem.videoId}/hqdefault.jpg`
+      : nicoThumbnailUrl(currentItem.videoId)
+    : null;
+
+  // ambient Glyph frame for VIEWER lock — video remains fully visible.
+  // A transparent shield blocks iframe clicks, while reportLocalEvent also
+  // rejects PLAY/PAUSE/SEEK from viewers (defence in depth).
+  const isViewerLocked = !!props.platform && !props.canControl && !props.driveMode;
+
+  // Keep YouTubeInner / NiconicoInner at the same position in the tree in
+  // both modes. React matches children by position and type, so moving the
+  // player into a different branch (as the old AUDIO ONLY early-return did)
+  // unmounts and remounts it: YouTube reloads from the start and Niconico
+  // rebuilds its iframe, losing the host's playback position. Only the
+  // surrounding chrome (hidden wrapper / footer) may change.
+  return (
+    <div
+      className={
+        isHostAudioOnly
+          ? 'nothing-panel relative w-full overflow-hidden'
+          : `${props.isFullscreen ? 'relative h-full w-full overflow-hidden bg-black group' : 'nothing-panel relative w-full overflow-hidden bg-black group'} ${isViewerLocked ? 'border border-[var(--nothing-red)]/30' : ''}`
+      }
+    >
+      {(isHostAudioOnly || !props.isFullscreen) && (
+        <div
+          className={`nothing-glyph ${isHostAudioOnly ? '' : 'absolute left-0 right-0 top-0 z-10'}`}
+          aria-hidden
+        />
+      )}
+
+      {props.platform === 'youtube' && <YouTubeInner {...props} />}
+      {props.platform === 'niconico' && <NiconicoInner {...props} />}
+
+      {isHostAudioOnly ? (
         <div className="flex items-center gap-3 border-t border-[var(--nothing-border)] bg-[var(--nothing-surface-raised)] p-3">
           {thumb && <img src={thumb} alt="" className="h-14 w-24 border border-[var(--nothing-border)] object-cover" loading="lazy" />}
           <div className="min-w-0 flex-1">
@@ -239,89 +266,76 @@ export function Player(props: PlayerProps) {
             ▶ / ⏸
           </button>
         </div>
-      </div>
-    );
-  }
-
-  // ambient Glyph frame for VIEWER lock — video remains fully visible.
-  // A transparent shield blocks iframe clicks, while reportLocalEvent also
-  // rejects PLAY/PAUSE/SEEK from viewers (defence in depth).
-  const isViewerLocked = !!props.platform && !props.canControl && !props.driveMode;
-
-  return (
-    <div
-      className={`${props.isFullscreen ? 'relative h-full w-full overflow-hidden bg-black group' : 'nothing-panel relative w-full overflow-hidden bg-black group'} ${isViewerLocked ? 'border border-[var(--nothing-red)]/30' : ''}`}
-    >
-      {!props.isFullscreen && <div className="nothing-glyph absolute left-0 right-0 top-0 z-10" aria-hidden />}
-
-      {props.platform === 'youtube' && <YouTubeInner {...props} />}
-      {props.platform === 'niconico' && <NiconicoInner {...props} />}
-      {!props.platform && (
-        <div className={`flex flex-col items-center justify-center gap-3 p-6 ${props.isFullscreen ? 'h-full w-full' : 'aspect-video'}`} >
-          <div className="flex h-12 w-12 items-center justify-center border border-[var(--nothing-border)] bg-[var(--nothing-surface)]">
-            <span className="text-lg text-[var(--nothing-text-dim)]">◇</span>
-          </div>
-          <p className="nothing-mono text-xs tracking-widest text-[var(--nothing-text-dim)]">READY · NO MEDIA</p>
-        </div>
-      )}
-      {isViewerLocked && (
-        <div
-          className="absolute inset-0 z-10"
-          aria-hidden
-          data-testid="viewer-input-shield"
-        />
-      )}
-      {(!!props.syncFallbackLevel ||
-        !!props.syncResyncing ||
-        (props.syncToleranceLag ?? 0) > 0) && (
-        <div
-          className="absolute left-2 top-2 z-20 flex max-w-[calc(100%-1rem)] items-center gap-2 border border-[var(--nothing-border-strong)] bg-black/85 px-2 py-1 backdrop-blur"
-          title={
-            props.syncResyncing && !props.syncFallbackLevel
-              ? 'ホストの再生位置に再同期しています'
-              : props.syncFallbackLevel
-                ? '低スペック端末向けフォールバック: 自動補正を一時停止して再生を優先しています'
-                : 'この端末のシーク読み込み時間を考慮してズレを許容しています。再同期で合わせ直せます。'
-          }
-        >
-          <span className="nothing-mono truncate text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
-            {props.syncResyncing && !props.syncFallbackLevel
-              ? '再同期中 · ホスト位置に合わせています'
-              : props.syncFallbackLevel
-                ? '自動追従を保留中 · 再生優先'
-                : `ズレ ${(props.syncToleranceLag ?? 0).toFixed(1)}s を許容中 · 再生優先`}
-          </span>
-          {props.onResync && (
-            <button
-              type="button"
-              onClick={props.onResync}
-              className="nothing-mono shrink-0 border border-[var(--nothing-red)] bg-[var(--nothing-red)] px-2 py-0.5 text-[10px] tracking-widest text-white hover:bg-[var(--nothing-red-hover)] active:scale-[0.98]"
-              aria-label="最新の再生位置に再同期"
-            >
-              再同期
-            </button>
+      ) : (
+        <>
+          {!props.platform && (
+            <div className={`flex flex-col items-center justify-center gap-3 p-6 ${props.isFullscreen ? 'h-full w-full' : 'aspect-video'}`} >
+              <div className="flex h-12 w-12 items-center justify-center border border-[var(--nothing-border)] bg-[var(--nothing-surface)]">
+                <span className="text-lg text-[var(--nothing-text-dim)]">◇</span>
+              </div>
+              <p className="nothing-mono text-xs tracking-widest text-[var(--nothing-text-dim)]">READY · NO MEDIA</p>
+            </div>
           )}
-        </div>
-      )}
-      {isViewerLocked && (
-        <div className="pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5">
-          <span className="nothing-mono border border-[var(--nothing-red)]/25 bg-black/70 px-2 py-1 text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
-            VIEWER · LOCKED
-          </span>
-        </div>
-      )}
+          {isViewerLocked && (
+            <div
+              className="absolute inset-0 z-10"
+              aria-hidden
+              data-testid="viewer-input-shield"
+            />
+          )}
+          {(!!props.syncFallbackLevel ||
+            !!props.syncResyncing ||
+            (props.syncToleranceLag ?? 0) > 0) && (
+            <div
+              className="absolute left-2 top-2 z-20 flex max-w-[calc(100%-1rem)] items-center gap-2 border border-[var(--nothing-border-strong)] bg-black/85 px-2 py-1 backdrop-blur"
+              title={
+                props.syncResyncing && !props.syncFallbackLevel
+                  ? 'ホストの再生位置に再同期しています'
+                  : props.syncFallbackLevel
+                    ? '低スペック端末向けフォールバック: 自動補正を一時停止して再生を優先しています'
+                    : 'この端末のシーク読み込み時間を考慮してズレを許容しています。再同期で合わせ直せます。'
+              }
+            >
+              <span className="nothing-mono truncate text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
+                {props.syncResyncing && !props.syncFallbackLevel
+                  ? '再同期中 · ホスト位置に合わせています'
+                  : props.syncFallbackLevel
+                    ? '自動追従を保留中 · 再生優先'
+                    : `ズレ ${(props.syncToleranceLag ?? 0).toFixed(1)}s を許容中 · 再生優先`}
+              </span>
+              {props.onResync && (
+                <button
+                  type="button"
+                  onClick={props.onResync}
+                  className="nothing-mono shrink-0 border border-[var(--nothing-red)] bg-[var(--nothing-red)] px-2 py-0.5 text-[10px] tracking-widest text-white hover:bg-[var(--nothing-red-hover)] active:scale-[0.98]"
+                  aria-label="最新の再生位置に再同期"
+                >
+                  再同期
+                </button>
+              )}
+            </div>
+          )}
+          {isViewerLocked && (
+            <div className="pointer-events-none absolute bottom-2 left-2 z-10 flex items-center gap-1.5">
+              <span className="nothing-mono border border-[var(--nothing-red)]/25 bg-black/70 px-2 py-1 text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
+                VIEWER · LOCKED
+              </span>
+            </div>
+          )}
 
-      {/* fullscreen toggle — visible on hover / always on mobile */}
-      <button
-        type="button"
-        onClick={props.onToggleFullscreen}
-        className="nothing-mono absolute bottom-2 right-2 z-20 flex items-center gap-1 border border-white/15 bg-black/70 px-2 py-1 text-[10px] tracking-widest text-white backdrop-blur hover:bg-black/90 active:scale-[0.98] opacity-60 hover:opacity-100 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity"
-        aria-label={props.isFullscreen ? '全画面を解除' : '全画面表示'}
-        title={props.isFullscreen ? '全画面を解除 (Esc)' : '全画面表示'}
-      >
-        <span className="text-[11px]">{props.isFullscreen ? '⛶' : '⛶'}</span>
-        <span className="hidden sm:inline">{props.isFullscreen ? 'EXIT' : 'FULL'}</span>
-      </button>
+          {/* fullscreen toggle — visible on hover / always on mobile */}
+          <button
+            type="button"
+            onClick={props.onToggleFullscreen}
+            className="nothing-mono absolute bottom-2 right-2 z-20 flex items-center gap-1 border border-white/15 bg-black/70 px-2 py-1 text-[10px] tracking-widest text-white backdrop-blur hover:bg-black/90 active:scale-[0.98] opacity-60 hover:opacity-100 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity"
+            aria-label={props.isFullscreen ? '全画面を解除' : '全画面表示'}
+            title={props.isFullscreen ? '全画面を解除 (Esc)' : '全画面表示'}
+          >
+            <span className="text-[11px]">{props.isFullscreen ? '⛶' : '⛶'}</span>
+            <span className="hidden sm:inline">{props.isFullscreen ? 'EXIT' : 'FULL'}</span>
+          </button>
+        </>
+      )}
     </div>
   );
 }
