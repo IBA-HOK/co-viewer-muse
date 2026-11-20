@@ -2,8 +2,22 @@ import { useEffect, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import { useYouTubePlayer } from '../hooks/useYouTubePlayer';
 import { useNiconicoPlayer } from '../hooks/useNiconicoPlayer';
+import { useLocalFilePlayer } from '../hooks/useLocalFilePlayer';
 import { nicoThumbnailUrl } from '../nicoThumbnail';
-import { toWatchUrl, type LocalPlayerEvent, type Platform, type PlayerController, type QueueItem } from '../types';
+import { formatBytes, formatDuration, type LocalMatchResult } from '../localFile';
+import {
+  toWatchUrl,
+  type LocalMediaMeta,
+  type LocalPlayerEvent,
+  type Platform,
+  type PlayerController,
+  type QueueItem,
+} from '../types';
+
+export interface LocalFilePending {
+  meta: LocalMediaMeta;
+  match: LocalMatchResult;
+}
 
 export interface PlayerProps {
   platform: Platform | null;
@@ -30,6 +44,22 @@ export interface PlayerProps {
   syncToleranceLag?: number;
   /** Manual re-align to the host's latest position (clears the fallback). */
   onResync?: () => void;
+  // ── local file source ──
+  /** Host-shared metadata for the current local item. */
+  localMeta?: LocalMediaMeta;
+  /** Object URL for the locally selected copy, or null while unselected. */
+  localFileUrl?: string | null;
+  /** Match result of the bound file (null until a file is bound). */
+  localMatch?: LocalMatchResult | null;
+  /** Candidate file awaiting explicit confirmation (duration mismatch). */
+  localPending?: LocalFilePending | null;
+  /** Selection / probe error to show in the local prompt. */
+  localError?: string | null;
+  /** Resolve a videoId to its bound object URL (used by the local player). */
+  localResolveUrl?: (videoId: string) => string | null;
+  onSelectLocalFile?: (file: File) => void;
+  onConfirmLocalFile?: () => void;
+  onCancelLocalFile?: () => void;
 }
 
 function YouTubeInner(props: PlayerProps) {
@@ -183,15 +213,232 @@ function NiconicoInner(props: PlayerProps) {
   );
 }
 
+function LocalFilePicker(props: {
+  onSelectLocalFile?: (file: File) => void;
+  label: string;
+  testId: string;
+}) {
+  return (
+    <label className="nothing-mono inline-flex cursor-pointer items-center gap-1.5 border border-[var(--nothing-border)] bg-[var(--nothing-surface-raised)] px-3 py-1 text-xs tracking-widest text-[var(--nothing-text)] hover:bg-[var(--nothing-surface-hover)]">
+      {props.label}
+      <input
+        type="file"
+        accept="video/*,audio/*"
+        data-testid={props.testId}
+        className="sr-only"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) props.onSelectLocalFile?.(file);
+          e.currentTarget.value = '';
+        }}
+      />
+    </label>
+  );
+}
+
+function LocalFilePrompt(props: PlayerProps) {
+  const meta = props.localMeta;
+  const pending = props.localPending;
+  return (
+    <div
+      className={`flex flex-col items-center justify-center gap-3 p-6 text-center bg-black ${
+        props.isFullscreen ? 'h-full w-full' : 'aspect-video'
+      }`}
+      data-testid="local-file-unselected"
+    >
+      <div className="flex h-12 w-12 items-center justify-center border border-[var(--nothing-border)] bg-[var(--nothing-surface)]">
+        <span className="text-lg text-[var(--nothing-text-dim)]">◇</span>
+      </div>
+      <p className="nothing-label">LOCAL FILE · 未選択</p>
+      {meta && (
+        <div className="space-y-1">
+          <p className="nothing-mono max-w-md truncate text-sm text-[var(--nothing-text)]">
+            {meta.fileName}
+          </p>
+          <p className="nothing-mono text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
+            {formatBytes(meta.sizeBytes)} · {formatDuration(meta.durationSec)} ·{' '}
+            {meta.mimeType || 'unknown type'}
+          </p>
+        </div>
+      )}
+      <p className="max-w-md text-xs leading-relaxed text-[var(--nothing-text-muted)]">
+        ホストと同じファイルを選択してください。ファイルの内容が送信されることはありません。
+      </p>
+
+      {pending && (
+        <div className="w-full max-w-md space-y-2 border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-left">
+          <p className="nothing-mono text-[11px] leading-relaxed text-amber-300">
+            ⚠ {pending.match.message}
+          </p>
+          <p className="nothing-mono truncate text-[10px] text-[var(--nothing-text-dim)]">
+            {pending.meta.fileName} · {formatBytes(pending.meta.sizeBytes)} ·{' '}
+            {formatDuration(pending.meta.durationSec)}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={props.onConfirmLocalFile}
+              className="nothing-mono bg-[var(--nothing-red)] px-3 py-1 text-xs tracking-widest text-white hover:bg-[var(--nothing-red-hover)]"
+            >
+              このファイルを使用
+            </button>
+            <button
+              type="button"
+              onClick={props.onCancelLocalFile}
+              className="nothing-mono border border-[var(--nothing-border)] bg-black px-3 py-1 text-xs tracking-widest text-[var(--nothing-text-dim)] hover:text-[var(--nothing-text)]"
+            >
+              選び直す
+            </button>
+          </div>
+        </div>
+      )}
+
+      {props.localError && (
+        <p className="nothing-mono max-w-md border border-[var(--nothing-red)]/30 bg-[var(--nothing-red-dim)] px-2 py-1 text-xs text-[var(--nothing-red)]">
+          ⚠ {props.localError}
+        </p>
+      )}
+
+      <LocalFilePicker
+        onSelectLocalFile={props.onSelectLocalFile}
+        label="ファイルを選択"
+        testId="local-file-input"
+      />
+      <p className="max-w-md text-[10px] leading-relaxed text-[var(--nothing-text-faint)]">
+        対応の目安: MP4 (H.264/AAC) / WebM / MP3 / M4A / WAV / OGG。
+        ブラウザがネイティブに再生できる形式のみ利用できます（トランスコードは行いません）。
+      </p>
+    </div>
+  );
+}
+
+function LocalFileInner(props: PlayerProps) {
+  const local = useLocalFilePlayer({
+    isRemoteSyncingRef: props.isRemoteSyncingRef,
+    onLocalEvent: props.reportLocalEvent,
+    resolveUrl: (videoId) => {
+      const resolved = props.localResolveUrl?.(videoId);
+      if (resolved) return resolved;
+      return videoId === props.videoId ? props.localFileUrl ?? null : null;
+    },
+    suppressEnd: !!props.localMatch?.suppressEnd,
+  });
+
+  const audioOnly = !!props.driveMode && !!props.audioOnly && !!props.isHost;
+
+  useEffect(() => {
+    props.controllerRef.current = local;
+    return () => {
+      if (props.controllerRef.current === local) props.controllerRef.current = null;
+    };
+  }, [local, props.controllerRef]);
+
+  useEffect(() => {
+    if (props.videoId && props.localFileUrl) local.loadMedia(props.videoId);
+  }, [props.videoId, props.localFileUrl, local.loadMedia]);
+
+  // Let room sync apply a snapshot that arrived while the file was unselected.
+  useEffect(() => {
+    if (!props.videoId || !local.ready) return;
+    props.onControllerReady?.();
+  }, [props.videoId, local.ready, props.onControllerReady]);
+
+  const warning = props.localMatch?.message;
+
+  return (
+    <div
+      className={`relative bg-black ${
+        props.isFullscreen && !audioOnly
+          ? 'h-full w-full'
+          : audioOnly
+            ? 'h-0 w-0 overflow-hidden'
+            : 'w-full aspect-video'
+      }`}
+    >
+      <video
+        ref={local.mediaRef}
+        controls={!audioOnly}
+        playsInline
+        preload="metadata"
+        data-testid="local-file-video"
+        className={
+          audioOnly
+            ? 'h-0 w-0 opacity-0'
+            : 'h-full w-full object-contain bg-black'
+        }
+      />
+
+      {!audioOnly && warning && (
+        <div className="absolute left-2 top-2 z-20 max-w-[calc(100%-1rem)] border border-amber-500/40 bg-black/85 px-2 py-1 backdrop-blur">
+          <p className="nothing-mono text-[10px] leading-relaxed text-amber-300">
+            ⚠ {warning}
+          </p>
+        </div>
+      )}
+
+      {!audioOnly && local.needsGesture && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/70 p-4 text-center">
+          <p className="nothing-mono text-xs text-[var(--nothing-text-muted)]">
+            ブラウザの自動再生がブロックされました
+          </p>
+          <button
+            type="button"
+            onClick={() => local.play()}
+            className="nothing-mono bg-[var(--nothing-red)] px-3 py-1 text-xs tracking-widest text-white hover:bg-[var(--nothing-red-hover)]"
+          >
+            タップして再生
+          </button>
+        </div>
+      )}
+
+      {local.error && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/90 p-4 text-center">
+          <p className="nothing-mono max-w-md text-xs text-[var(--nothing-red)]">
+            ⚠ {local.error}
+          </p>
+          <LocalFilePicker
+            onSelectLocalFile={props.onSelectLocalFile}
+            label="再選択"
+            testId="local-file-reselect"
+          />
+        </div>
+      )}
+
+      {local.endedSuppressed && (
+        <div className="absolute inset-x-0 bottom-14 z-20 flex justify-center">
+          <p className="nothing-mono border border-[var(--nothing-border)] bg-black/85 px-2 py-1 text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
+            手元のファイルが終了しました（ルームは継続）
+          </p>
+        </div>
+      )}
+
+      {!audioOnly && (
+        <div className="absolute right-2 top-2 z-20">
+          <LocalFilePicker
+            onSelectLocalFile={props.onSelectLocalFile}
+            label="別のファイル"
+            testId="local-file-reselect"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export function Player(props: PlayerProps) {
   const isGuestDrive = !!props.driveMode && !props.isHost;
   if (isGuestDrive) {
     const currentItem = props.queue?.find((q) => q.id === props.currentId) ?? null;
-    const title = currentItem ? (props.titles?.[currentItem.id] ?? currentItem.videoId) : null;
+    const title = currentItem
+      ? (props.titles?.[currentItem.id] ?? currentItem.local?.fileName ?? currentItem.videoId)
+      : null;
     const thumb = currentItem
       ? currentItem.platform === 'youtube'
         ? `https://i.ytimg.com/vi/${currentItem.videoId}/hqdefault.jpg`
-        : nicoThumbnailUrl(currentItem.videoId)
+        : currentItem.platform === 'niconico'
+          ? nicoThumbnailUrl(currentItem.videoId)
+          : null
       : null;
     return (
       <div className="nothing-panel relative w-full overflow-hidden p-6 text-center">
@@ -214,11 +461,15 @@ export function Player(props: PlayerProps) {
   const currentItem = isHostAudioOnly
     ? props.queue?.find((q) => q.id === props.currentId) ?? null
     : null;
-  const title = currentItem ? (props.titles?.[currentItem.id] ?? currentItem.videoId) : null;
+  const title = currentItem
+    ? (props.titles?.[currentItem.id] ?? currentItem.local?.fileName ?? currentItem.videoId)
+    : null;
   const thumb = currentItem
     ? currentItem.platform === 'youtube'
       ? `https://i.ytimg.com/vi/${currentItem.videoId}/hqdefault.jpg`
-      : nicoThumbnailUrl(currentItem.videoId)
+      : currentItem.platform === 'niconico'
+        ? nicoThumbnailUrl(currentItem.videoId)
+        : null
     : null;
 
   // ambient Glyph frame for VIEWER lock — video remains fully visible.
@@ -249,6 +500,12 @@ export function Player(props: PlayerProps) {
 
       {props.platform === 'youtube' && <YouTubeInner {...props} />}
       {props.platform === 'niconico' && <NiconicoInner {...props} />}
+      {props.platform === 'local' &&
+        (props.localFileUrl ? (
+          <LocalFileInner {...props} />
+        ) : (
+          <LocalFilePrompt {...props} />
+        ))}
 
       {isHostAudioOnly ? (
         <div className="flex items-center gap-3 border-t border-[var(--nothing-border)] bg-[var(--nothing-surface-raised)] p-3">

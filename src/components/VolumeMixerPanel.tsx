@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import type { MutableRefObject } from 'react';
-import type { Participant, PlayerController } from '../types';
+import type { Participant, Platform, PlayerController } from '../types';
 import type { UseVoiceChatResult } from '../hooks/useVoiceChat';
 
 interface VolumeMixerPanelProps {
   controllerRef: MutableRefObject<PlayerController | null>;
   voiceChat: UseVoiceChatResult;
   participants: Participant[];
-  currentPlatform: 'youtube' | 'niconico' | null;
+  currentPlatform: Platform | null;
   currentId?: string | null;
 }
 

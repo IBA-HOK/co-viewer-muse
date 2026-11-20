@@ -4,6 +4,8 @@ import {
   SYNC_DRIFT_THRESHOLD,
   SYNC_PING_INTERVAL,
   type ChatMessage,
+  type CurrentMedia,
+  type LocalMediaMeta,
   type LocalPlayerEvent,
   type Participant,
   type Platform,
@@ -54,7 +56,7 @@ export interface UseRoomSyncResult {
   canQueue: boolean;
   driveMode: boolean;
   driveAudioOnly: boolean;
-  currentMedia: { platform: Platform; videoId: string } | null;
+  currentMedia: CurrentMedia | null;
   queue: QueueItem[];
   currentId: string | null;
   isPlaying: boolean;
@@ -87,7 +89,11 @@ export interface UseRoomSyncResult {
   handleIncoming: (msg: SyncMessage, fromPeerId: string) => void;
   reportLocalEvent: (e: LocalPlayerEvent) => void;
   localSeek: (seconds: number) => void;
-  localLoadMedia: (platform: Platform, videoId: string) => void;
+  localLoadMedia: (
+    platform: Platform,
+    videoId: string,
+    local?: LocalMediaMeta
+  ) => void;
   titles: Record<string, string>;
   goToItem: (id: string) => void;
   goNext: () => void;
@@ -238,9 +244,7 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const participantsRef = useRef<Participant[]>([]);
   const queueRef = useRef<QueueItem[]>([]);
   const currentIdRef = useRef<string | null>(null);
-  const currentMediaRef = useRef<{ platform: Platform; videoId: string } | null>(
-    null
-  );
+  const currentMediaRef = useRef<CurrentMedia | null>(null);
   const isPlayingRef = useRef(false);
   const hasReceivedRoomStateRef = useRef(false);
   const currentTimeRef = useRef(0);
@@ -251,14 +255,13 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   const chatRef = useRef<ChatMessage[]>([]);
 
   // The currently-playing video is derived from the queue + pointer.
-  const currentMedia = useMemo<{ platform: Platform; videoId: string } | null>(
-    () => {
-      if (!currentId) return null;
-      const it = queue.find((q) => q.id === currentId);
-      return it ? { platform: it.platform, videoId: it.videoId } : null;
-    },
-    [queue, currentId]
-  );
+  const currentMedia = useMemo<CurrentMedia | null>(() => {
+    if (!currentId) return null;
+    const it = queue.find((q) => q.id === currentId);
+    return it
+      ? { platform: it.platform, videoId: it.videoId, local: it.local }
+      : null;
+  }, [queue, currentId]);
 
   // Keep refs in sync for use inside stable callbacks.
   useEffect(() => {
@@ -366,8 +369,31 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       titleRetryTimersRef.current.delete(id);
     }
 
+    // Local items carry their display name directly; never hit the network.
+    const missingLocalTitles = queue.filter(
+      (q) =>
+        q.platform === 'local' &&
+        !!q.local &&
+        titles[q.id] !== q.local.fileName
+    );
+    if (missingLocalTitles.length > 0) {
+      setTitles((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const item of missingLocalTitles) {
+          const name = item.local?.fileName;
+          if (name && next[item.id] !== name) {
+            next[item.id] = name;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+
     const missing = queue.filter(
       (q) =>
+        q.platform !== 'local' &&
         !titles[q.id] &&
         !titleFailedRef.current.has(q.id) &&
         !titleInFlightRef.current.has(q.id) &&
@@ -1190,13 +1216,22 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
   }, [isHost, myId]);
 
   const localLoadMedia = useCallback(
-    (platform: Platform, videoId: string) => {
+    (platform: Platform, videoId: string, local?: LocalMediaMeta) => {
       if (!canControlNow()) return;
       const id = `${platform}:${videoId}`;
       const exists = queueRef.current.some((q) => q.id === id);
       const nextQueue = exists
         ? queueRef.current
-        : [...queueRef.current, { id, platform, videoId, addedBy: getConfirmedSelfName() }];
+        : [
+            ...queueRef.current,
+            {
+              id,
+              platform,
+              videoId,
+              addedBy: getConfirmedSelfName(),
+              ...(local ? { local } : {}),
+            },
+          ];
       const wasEmpty = currentIdRef.current === null;
       const wasAtTailAndStopped =
         !wasEmpty &&
@@ -1211,6 +1246,16 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       if (wasEmpty || wasAtTailAndStopped) {
         commitCurrentId(id);
         if (!driveModeRef.current || isHost) {
+          // A local player mounts only after this state update, so the
+          // load/seek/play below cannot reach it yet. Queue the position for
+          // `onControllerReady` once the file metadata is available.
+          if (platform === 'local') {
+            pendingSnapshotRef.current = {
+              videoId,
+              currentTime: 0,
+              isPlaying: true,
+            };
+          }
           resetDriftGuard(true);
           applyRemote(() => {
             controllerRef.current?.loadMedia(videoId);
@@ -1250,6 +1295,15 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
       commitCurrentId(id);
       resetDriftGuard(true);
       if (!driveModeRef.current || isHost) {
+        if (it.platform === 'local' && !restart) {
+          // The local player mounts/loads from this state update; apply the
+          // start position when its first `loadedmetadata` arrives.
+          pendingSnapshotRef.current = {
+            videoId: it.videoId,
+            currentTime: 0,
+            isPlaying: true,
+          };
+        }
         applyRemote(() => {
           controllerRef.current?.loadMedia(it.videoId);
           // `getCurrentTime()` may still report the previous video right after
@@ -1311,10 +1365,18 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
           // is a drive-mode guest that does not operate its own player.
           setPlayingState(true);
           if (!driveModeRef.current || isHost) {
+            if (replacement.platform === 'local') {
+              // Apply the start position once the local player is ready.
+              pendingSnapshotRef.current = {
+                videoId: replacement.videoId,
+                currentTime: 0,
+                isPlaying: true,
+              };
+            }
             applyRemote(() => {
               controllerRef.current?.loadMedia(replacement.videoId);
-              // The old playhead can still be reported right after loadMedia();
-              // the replacement must start from the beginning.
+              // The old playhead can still be reported right after
+              // loadMedia(); the replacement must start from the beginning.
               controllerRef.current?.seekTo(0);
               controllerRef.current?.play();
             });
@@ -1728,7 +1790,10 @@ export function useRoomSync(opts: UseRoomSyncOptions): UseRoomSyncResult {
     const thumb =
       next.platform === 'youtube'
         ? `https://i.ytimg.com/vi/${next.videoId}/hqdefault.jpg`
-        : nicoThumbnailUrl(next.videoId);
+        : next.platform === 'niconico'
+          ? nicoThumbnailUrl(next.videoId)
+          : null;
+    if (!thumb) return;
     const img = new Image();
     img.src = thumb;
   }, [driveMode, isHost, queue, currentId]);

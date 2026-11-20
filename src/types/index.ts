@@ -1,7 +1,7 @@
 // Core domain types for the P2P co-viewer.
 // These contracts are the single source of truth shared by hooks and components.
 
-export type Platform = 'youtube' | 'niconico';
+export type Platform = 'youtube' | 'niconico' | 'local';
 
 export type Role = 'Host' | 'Controller' | 'Viewer';
 
@@ -12,12 +12,37 @@ export interface Participant {
   role: Role;
 }
 
+/**
+ * Identity metadata for a local file, shared over the existing sync messages.
+ * A file path is deliberately never included: each participant picks their own
+ * copy of the file from their own device.
+ */
+export interface LocalMediaMeta {
+  /** Display / auxiliary match value (1..255 characters). */
+  fileName: string;
+  /** `File.size` (non-negative integer). */
+  sizeBytes: number;
+  /** Duration in seconds; 0 when it could not be read. */
+  durationSec: number;
+  /** `File.type`; may be an empty string. */
+  mimeType: string;
+}
+
 /** A single queued video. `id` is `${platform}:${videoId}` for dedupe. */
 export interface QueueItem {
   id: string;
   platform: Platform;
   videoId: string;
   addedBy: string;
+  /** Present only when `platform === 'local'`. */
+  local?: LocalMediaMeta;
+}
+
+/** The currently-playing media, derived from the queue + current pointer. */
+export interface CurrentMedia {
+  platform: Platform;
+  videoId: string;
+  local?: LocalMediaMeta;
 }
 
 /** A single P2P chat message. `id` is `${peerId}-${timestamp}-${rand}` for dedupe. */
@@ -103,12 +128,18 @@ export type SyncMessage =
       senderId: string;
     };
 
-const PLATFORMS: readonly Platform[] = ['youtube', 'niconico'];
+const PLATFORMS: readonly Platform[] = ['youtube', 'niconico', 'local'];
 const ROLES: readonly Role[] = ['Host', 'Controller', 'Viewer'];
 
 /** Maximum chat text/name lengths accepted from remote peers. */
 export const MAX_CHAT_TEXT_LENGTH = 500;
 export const MAX_CHAT_NAME_LENGTH = 24;
+
+/** Bounds for local-media metadata accepted from remote peers. */
+export const MAX_LOCAL_FILE_NAME_LENGTH = 255;
+export const MAX_LOCAL_MIME_LENGTH = 100;
+export const MAX_LOCAL_DURATION_SEC = 86400;
+const LOCAL_VIDEO_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -138,11 +169,40 @@ function isParticipant(value: unknown): value is Participant {
 
 function isQueueItem(value: unknown): value is QueueItem {
   if (!isRecord(value)) return false;
+  if (
+    typeof value.id !== 'string' ||
+    !isPlatform(value.platform) ||
+    typeof value.videoId !== 'string' ||
+    typeof value.addedBy !== 'string'
+  ) {
+    return false;
+  }
+  if (value.platform !== 'local') {
+    // Backward compatibility: a non-local item may legitimately omit `local`.
+    // A stray `local` field on a YouTube/Niconico item is simply ignored.
+    return true;
+  }
   return (
-    typeof value.id === 'string' &&
-    isPlatform(value.platform) &&
-    typeof value.videoId === 'string' &&
-    typeof value.addedBy === 'string'
+    LOCAL_VIDEO_ID_RE.test(value.videoId) && isLocalMediaMeta(value.local)
+  );
+}
+
+/** Validate a `LocalMediaMeta` received from an untrusted transport. */
+export function isLocalMediaMeta(value: unknown): value is LocalMediaMeta {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.fileName === 'string' &&
+    value.fileName.length >= 1 &&
+    value.fileName.length <= MAX_LOCAL_FILE_NAME_LENGTH &&
+    typeof value.sizeBytes === 'number' &&
+    Number.isSafeInteger(value.sizeBytes) &&
+    value.sizeBytes >= 0 &&
+    typeof value.durationSec === 'number' &&
+    Number.isFinite(value.durationSec) &&
+    value.durationSec >= 0 &&
+    value.durationSec <= MAX_LOCAL_DURATION_SEC &&
+    typeof value.mimeType === 'string' &&
+    value.mimeType.length <= MAX_LOCAL_MIME_LENGTH
   );
 }
 
@@ -203,6 +263,7 @@ export function isValidSyncMessage(value: unknown): value is SyncMessage {
       return (
         isPlatform(value.platform) &&
         typeof value.videoId === 'string' &&
+        (value.platform !== 'local' || LOCAL_VIDEO_ID_RE.test(value.videoId)) &&
         isFiniteNumber(value.currentTime) &&
         typeof value.isPlaying === 'boolean' &&
         isQueue(value.queue) &&
@@ -336,7 +397,12 @@ export function parseMediaInput(raw: string): ParsedMedia | null {
 
 /** A human-readable display URL for a parsed media reference. */
 export function toWatchUrl(media: ParsedMedia): string {
-  return media.platform === 'youtube'
-    ? `https://www.youtube.com/watch?v=${media.videoId}`
-    : `https://www.nicovideo.jp/watch/${media.videoId}`;
+  if (media.platform === 'youtube') {
+    return `https://www.youtube.com/watch?v=${media.videoId}`;
+  }
+  if (media.platform === 'niconico') {
+    return `https://www.nicovideo.jp/watch/${media.videoId}`;
+  }
+  // Local media has no external watch page.
+  return '';
 }

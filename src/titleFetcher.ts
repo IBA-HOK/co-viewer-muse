@@ -256,7 +256,9 @@ export async function fetchTitle(platform: Platform, videoId: string): Promise<s
   try {
     const signal = undefined;
     if (platform === 'youtube') return await fetchYouTubeTitle(videoId, signal);
-    return await fetchNicoTitle(videoId, signal);
+    if (platform === 'niconico') return await fetchNicoTitle(videoId, signal);
+    // Local files carry their display name in the queue item; never fetch.
+    return null;
   } catch {
     return null;
   }

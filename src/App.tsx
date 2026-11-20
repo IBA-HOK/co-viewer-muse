@@ -10,10 +10,18 @@ import ChatPanel from './components/ChatPanel';
 import ParticipantList from './components/ParticipantList';
 import VoiceChatPanel from './components/VoiceChatPanel';
 import BrowserPanel from './components/BrowserPanel';
+import LocalFilePanel from './components/LocalFilePanel';
 import DriveModePanel from './components/DriveModePanel';
 import VolumeMixerPanel from './components/VolumeMixerPanel';
 import { computeUnreadChatCount } from './chatUnread';
 import { scheduleResumeRetries, type ResumeRetryScheduler } from './playbackResume';
+import {
+  createLocalMediaId,
+  matchLocalFile,
+  probeLocalMedia,
+  type LocalMatchResult,
+} from './localFile';
+import type { LocalQueueStatus } from './components/QueuePanel';
 import {
   cancelNicknameBroadcast,
   flushNicknameBroadcast,
@@ -23,6 +31,7 @@ import JoinModal from './components/JoinModal';
 import InviteQRModal from './components/InviteQRModal';
 import {
   parseMediaInput,
+  type LocalMediaMeta,
   type Role,
   type SyncMessage,
 } from './types';
@@ -54,6 +63,20 @@ const VIEW_SWIPE_THRESHOLD = 48;
 
 const VIEW_SWIPE_INTERACTIVE_SELECTOR =
   'button, a, input, textarea, select, [contenteditable]';
+
+interface LocalFileEntry {
+  file: File;
+  url: string;
+  meta: LocalMediaMeta;
+  match: LocalMatchResult;
+}
+
+interface PendingLocalFile {
+  videoId: string;
+  file: File;
+  meta: LocalMediaMeta;
+  match: LocalMatchResult;
+}
 
 export default function App() {
   const roomIdFromUrl = useRoomIdFromUrl();
@@ -107,6 +130,12 @@ export default function App() {
   const [isSyncPulse, setPulse] = useState(false);
   const prevIsPlayingRef = useRef(false);
   const prevTimeRef = useRef(0);
+
+  // Local file registry: `File` objects + object URLs never leave this device.
+  const localFilesRef = useRef<Map<string, LocalFileEntry>>(new Map());
+  const [localFilesVersion, setLocalFilesVersion] = useState(0);
+  const [localPending, setLocalPending] = useState<PendingLocalFile | null>(null);
+  const [localErrors, setLocalErrors] = useState<Record<string, string>>({});
 
   // fullscreen + drawer (player only)
   const playerWrapRef = useRef<HTMLDivElement>(null);
@@ -388,6 +417,181 @@ export default function App() {
     [roomSync]
   );
 
+  /** Bind a selected file to a local queue item, revoking any previous URL. */
+  const bindLocalFile = useCallback(
+    (videoId: string, file: File, meta: LocalMediaMeta, match: LocalMatchResult) => {
+      const registry = localFilesRef.current;
+      const previous = registry.get(videoId);
+      if (previous) URL.revokeObjectURL(previous.url);
+      registry.set(videoId, {
+        file,
+        url: URL.createObjectURL(file),
+        meta,
+        match,
+      });
+      setLocalFilesVersion((v) => v + 1);
+      setLocalPending((pending) =>
+        pending && pending.videoId === videoId ? null : pending
+      );
+      setLocalErrors((prev) => {
+        if (!prev[videoId]) return prev;
+        const next = { ...prev };
+        delete next[videoId];
+        return next;
+      });
+      // A guest that just selected the file should not wait up to 3s for the
+      // next SYNC_PING: ask the host for the current position immediately.
+      if (!transport.isHost) roomSync.onGuestReady();
+    },
+    [roomSync, transport.isHost]
+  );
+
+  /** Host/Controller path: probe, bind and enqueue one local file. */
+  const handleAddLocalFile = useCallback(
+    (file: File, meta: LocalMediaMeta) => {
+      if (!roomSync.canQueue) return;
+      const videoId = createLocalMediaId();
+      bindLocalFile(videoId, file, meta, matchLocalFile(meta, meta));
+      roomSync.localLoadMedia('local', videoId, meta);
+    },
+    [bindLocalFile, roomSync]
+  );
+
+  /** Guest path: probe the selected copy and compare it with the host's meta. */
+  const handleSelectLocalFile = useCallback(
+    async (videoId: string, file: File) => {
+      const hostItem = roomSync.queue.find(
+        (q) => q.platform === 'local' && q.videoId === videoId
+      );
+      if (!hostItem?.local) return;
+      try {
+        const meta = await probeLocalMedia(file);
+        const match = matchLocalFile(hostItem.local, meta);
+        if (!match.canBind) {
+          setLocalErrors((prev) => ({
+            ...prev,
+            [videoId]: match.message ?? 'このファイルは使用できません。',
+          }));
+          setLocalPending((pending) =>
+            pending && pending.videoId === videoId ? null : pending
+          );
+          return;
+        }
+        if (match.requiresConfirmation) {
+          setLocalPending({ videoId, file, meta, match });
+          setLocalErrors((prev) => {
+            if (!prev[videoId]) return prev;
+            const next = { ...prev };
+            delete next[videoId];
+            return next;
+          });
+          return;
+        }
+        bindLocalFile(videoId, file, meta, match);
+      } catch (err) {
+        setLocalErrors((prev) => ({
+          ...prev,
+          [videoId]:
+            err instanceof Error
+              ? err.message
+              : 'このファイルを読み込めませんでした。',
+        }));
+      }
+    },
+    [bindLocalFile, roomSync.queue]
+  );
+
+  const handleConfirmLocalFile = useCallback(() => {
+    if (!localPending) return;
+    bindLocalFile(
+      localPending.videoId,
+      localPending.file,
+      localPending.meta,
+      localPending.match
+    );
+  }, [bindLocalFile, localPending]);
+
+  const handleCancelLocalFile = useCallback(() => {
+    setLocalPending(null);
+  }, []);
+
+  // A local item removes its object URL when it leaves the queue; the final
+  // unmount revokes everything that is still bound.
+  useEffect(() => {
+    const liveVideoIds = new Set(
+      roomSync.queue
+        .filter((q) => q.platform === 'local')
+        .map((q) => q.videoId)
+    );
+    let changed = false;
+    for (const [videoId, entry] of Array.from(localFilesRef.current.entries())) {
+      if (liveVideoIds.has(videoId)) continue;
+      URL.revokeObjectURL(entry.url);
+      localFilesRef.current.delete(videoId);
+      changed = true;
+    }
+    if (changed) setLocalFilesVersion((v) => v + 1);
+  }, [roomSync.queue]);
+
+  useEffect(
+    () => () => {
+      for (const entry of localFilesRef.current.values()) {
+        URL.revokeObjectURL(entry.url);
+      }
+      localFilesRef.current.clear();
+    },
+    []
+  );
+
+  // Drop a pending confirmation when its queue item disappears.
+  useEffect(() => {
+    if (!localPending) return;
+    const stillQueued = roomSync.queue.some(
+      (q) => q.platform === 'local' && q.videoId === localPending.videoId
+    );
+    if (!stillQueued) setLocalPending(null);
+  }, [localPending, roomSync.queue]);
+
+  const localFileState = useMemo(
+    () => ({ version: localFilesVersion, files: localFilesRef.current }),
+    [localFilesVersion]
+  );
+
+  const currentLocalItem = useMemo(() => {
+    if (!roomSync.currentId) return null;
+    return (
+      roomSync.queue.find(
+        (q) => q.id === roomSync.currentId && q.platform === 'local'
+      ) ?? null
+    );
+  }, [roomSync.queue, roomSync.currentId]);
+
+  const currentLocalEntry = currentLocalItem
+    ? localFileState.files.get(currentLocalItem.videoId)
+    : undefined;
+
+  const currentLocalPending =
+    currentLocalItem && localPending?.videoId === currentLocalItem.videoId
+      ? localPending
+      : null;
+
+  const localStatus = useMemo(() => {
+    const status: Record<string, LocalQueueStatus> = {};
+    for (const item of roomSync.queue) {
+      if (item.platform !== 'local') continue;
+      if (localPending?.videoId === item.videoId) status[item.id] = 'confirm';
+      else status[item.id] = localFileState.files.has(item.videoId)
+        ? 'selected'
+        : 'unselected';
+    }
+    return status;
+  }, [roomSync.queue, localPending, localFileState]);
+
+  const resolveLocalUrl = useCallback(
+    (videoId: string) => localFilesRef.current.get(videoId)?.url ?? null,
+    []
+  );
+
   const handleDelegate = useCallback(
     (peerId: string, role: Role) => {
       roomSync.delegateController(peerId, role);
@@ -664,13 +868,20 @@ export default function App() {
       const rs = roomSyncRef.current;
       if (!ctrl || !rs) return;
       const cur = rs.queue.find((q) => q.id === rs.currentId);
-      const title = cur ? (rs.titles[cur.id] ?? cur.videoId) : 'Co-Viewer';
+      const title = cur
+        ? (rs.titles[cur.id] ?? cur.local?.fileName ?? cur.videoId)
+        : 'Co-Viewer';
+      const album = cur
+        ? cur.platform === 'local'
+          ? `local · ${cur.local?.fileName ?? 'file'}`
+          : `${cur.platform} · ${cur.videoId}`
+        : 'P2P SYNC';
       try {
         if ('mediaSession' in navigator && typeof (window as unknown as { MediaMetadata?: unknown }).MediaMetadata !== 'undefined') {
           const md = new (window as unknown as { MediaMetadata: new (o: Record<string, string>) => unknown }).MediaMetadata({
             title,
             artist: 'Co-Viewer — P2P 同時視聴',
-            album: cur ? `${cur.platform} · ${cur.videoId}` : 'P2P SYNC',
+            album,
           });
           (navigator as unknown as { mediaSession: { metadata: unknown } }).mediaSession.metadata = md;
           const ms = (navigator as unknown as { mediaSession: { setActionHandler: (a: string, h: (() => void) | null) => void } }).mediaSession;
@@ -789,6 +1000,30 @@ export default function App() {
               syncResyncing={roomSync.syncResyncing}
               syncToleranceLag={roomSync.syncToleranceLag}
               onResync={roomSync.resyncNow}
+              localMeta={currentLocalItem?.local}
+              localFileUrl={currentLocalEntry?.url ?? null}
+              localMatch={currentLocalEntry?.match ?? null}
+              localPending={
+                currentLocalPending
+                  ? {
+                      meta: currentLocalPending.meta,
+                      match: currentLocalPending.match,
+                    }
+                  : null
+              }
+              localError={
+                currentLocalItem
+                  ? localErrors[currentLocalItem.videoId] ?? null
+                  : null
+              }
+              localResolveUrl={resolveLocalUrl}
+              onSelectLocalFile={(file) => {
+                if (currentLocalItem) {
+                  void handleSelectLocalFile(currentLocalItem.videoId, file);
+                }
+              }}
+              onConfirmLocalFile={handleConfirmLocalFile}
+              onCancelLocalFile={handleCancelLocalFile}
             />
             </div>
           </div>
@@ -847,8 +1082,13 @@ export default function App() {
                   onPrev={roomSync.goPrevious}
                   onRemove={roomSync.removeFromQueue}
                   onMove={roomSync.moveInQueue}
+                  localStatus={localStatus}
                 />
                 <BrowserPanel onAddToQueue={handleLoadMedia} canQueue={roomSync.canQueue} />
+                <LocalFilePanel
+                  canQueue={roomSync.canQueue}
+                  onAddFile={handleAddLocalFile}
+                />
                 <ChatPanel
                   messages={roomSync.chat}
                   myId={transport.myId}
@@ -1093,6 +1333,7 @@ export default function App() {
               onPrev={roomSync.goPrevious}
               onRemove={roomSync.removeFromQueue}
               onMove={roomSync.moveInQueue}
+              localStatus={localStatus}
             />
           </div>
 
@@ -1108,6 +1349,15 @@ export default function App() {
           {!isFullscreen && (
             <div className="lg:col-span-12">
               <BrowserPanel onAddToQueue={handleLoadMedia} canQueue={roomSync.canQueue} />
+            </div>
+          )}
+
+          {!isFullscreen && (
+            <div className="lg:col-span-12">
+              <LocalFilePanel
+                canQueue={roomSync.canQueue}
+                onAddFile={handleAddLocalFile}
+              />
             </div>
           )}
 

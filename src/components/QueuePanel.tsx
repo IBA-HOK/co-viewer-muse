@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { QueueItem } from '../types';
+import { formatBytes, formatDuration } from '../localFile';
+
+export type LocalQueueStatus = 'selected' | 'unselected' | 'confirm';
 
 interface QueuePanelProps {
   queue: QueueItem[];
@@ -11,16 +14,26 @@ interface QueuePanelProps {
   onPrev: () => void;
   onRemove: (id: string) => void;
   onMove: (from: number, to: number) => void;
+  /** Per-local-item selection state, keyed by queue item id. */
+  localStatus?: Record<string, LocalQueueStatus>;
 }
 
 const PLATFORM_BADGE: Record<QueueItem['platform'], string> = {
   youtube: 'border-[var(--nothing-border)] bg-black text-[var(--nothing-text-muted)]',
   niconico: 'border-[var(--nothing-red)]/30 bg-[var(--nothing-red-dim)] text-[var(--nothing-red)]',
+  local: 'border-[var(--nothing-border)] bg-[var(--nothing-surface-raised)] text-[var(--nothing-text-muted)]',
 };
 
 const PLATFORM_LABEL: Record<QueueItem['platform'], string> = {
   youtube: 'YT',
   niconico: 'NICO',
+  local: 'LOCAL',
+};
+
+const LOCAL_STATUS_LABEL: Record<LocalQueueStatus, string> = {
+  selected: '選択済み',
+  unselected: '未選択',
+  confirm: '要確認',
 };
 
 export default function QueuePanel({
@@ -33,6 +46,7 @@ export default function QueuePanel({
   onPrev,
   onRemove,
   onMove,
+  localStatus,
 }: QueuePanelProps) {
   const currentIndex = queue.findIndex((q) => q.id === currentId);
   const disabled = !canControl;
@@ -190,12 +204,30 @@ export default function QueuePanel({
                   }`}
                 >
                   <div className="nothing-mono truncate text-xs text-[var(--nothing-text)]">
-                    {titles[item.id] ?? item.videoId}
+                    {titles[item.id] ?? item.local?.fileName ?? item.videoId}
                   </div>
                   <div className="truncate text-[10px] tracking-widest text-[var(--nothing-text-faint)]">
-                    {item.videoId} {item.addedBy ? `· ${item.addedBy}` : ''}
+                    {item.local
+                      ? `${formatBytes(item.local.sizeBytes)} · ${formatDuration(
+                          item.local.durationSec
+                        )}${item.addedBy ? ` · ${item.addedBy}` : ''}`
+                      : `${item.videoId} ${item.addedBy ? `· ${item.addedBy}` : ''}`}
                   </div>
                 </button>
+
+                {item.platform === 'local' && localStatus?.[item.id] && (
+                  <span
+                    className={`nothing-mono shrink-0 border px-1 py-0.5 text-[9px] tracking-widest ${
+                      localStatus[item.id] === 'confirm'
+                        ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                        : localStatus[item.id] === 'selected'
+                          ? 'border-[var(--nothing-border)] bg-black text-[var(--nothing-text-dim)]'
+                          : 'border-[var(--nothing-border)] bg-black text-[var(--nothing-text-faint)]'
+                    }`}
+                  >
+                    {LOCAL_STATUS_LABEL[localStatus[item.id]]}
+                  </span>
+                )}
 
                 {isCurrent && (
                   <span className="nothing-mono shrink-0 bg-[var(--nothing-red)] px-1.5 py-0.5 text-[9px] font-bold tracking-[0.16em] text-white">

@@ -271,3 +271,130 @@ describe('isValidSyncMessage', () => {
     expect(isValidSyncMessage(value)).toBe(false);
   });
 });
+
+describe('isValidSyncMessage · local file metadata', () => {
+  const LOCAL_META = {
+    fileName: 'holiday.mp4',
+    sizeBytes: 123456,
+    durationSec: 90,
+    mimeType: 'video/mp4',
+  };
+  const LOCAL_ITEM: QueueItem = {
+    id: 'local:local-abcdefgh',
+    platform: 'local',
+    videoId: 'local-abcdefgh',
+    addedBy: 'Host',
+    local: LOCAL_META,
+  };
+  const LOCAL_QUEUE = [LOCAL_ITEM];
+
+  it('accepts a local QUEUE_UPDATE', () => {
+    expect(
+      isValidSyncMessage({
+        type: 'QUEUE_UPDATE',
+        queue: LOCAL_QUEUE,
+        currentId: LOCAL_ITEM.id,
+        currentTime: 10,
+        senderId: 'host-1',
+      })
+    ).toBe(true);
+  });
+
+  it('accepts a local STATE_SNAPSHOT', () => {
+    expect(
+      isValidSyncMessage({
+        type: 'STATE_SNAPSHOT',
+        platform: 'local',
+        videoId: LOCAL_ITEM.videoId,
+        currentTime: 10,
+        isPlaying: true,
+        queue: LOCAL_QUEUE,
+        currentId: LOCAL_ITEM.id,
+        senderId: 'host-1',
+      })
+    ).toBe(true);
+  });
+
+  it('still accepts existing platforms without a local field', () => {
+    expect(
+      isValidSyncMessage({
+        type: 'QUEUE_UPDATE',
+        queue: QUEUE,
+        currentId: QUEUE[0].id,
+        currentTime: 0,
+        senderId: 'host-1',
+      })
+    ).toBe(true);
+  });
+
+  it('ignores a stray local field on a non-local item', () => {
+    expect(
+      isValidSyncMessage({
+        type: 'QUEUE_UPDATE',
+        queue: [{ ...QUEUE[0], local: LOCAL_META }],
+        currentId: QUEUE[0].id,
+        currentTime: 0,
+        senderId: 'host-1',
+      })
+    ).toBe(true);
+  });
+
+  it.each([
+    ['missing local metadata', { ...LOCAL_ITEM, local: undefined }],
+    ['an empty file name', { ...LOCAL_ITEM, local: { ...LOCAL_META, fileName: '' } }],
+    [
+      'an over-long file name',
+      { ...LOCAL_ITEM, local: { ...LOCAL_META, fileName: 'n'.repeat(256) } },
+    ],
+    [
+      'a negative size',
+      { ...LOCAL_ITEM, local: { ...LOCAL_META, sizeBytes: -1 } },
+    ],
+    [
+      'a non-integer size',
+      { ...LOCAL_ITEM, local: { ...LOCAL_META, sizeBytes: 1.5 } },
+    ],
+    [
+      'a non-finite duration',
+      { ...LOCAL_ITEM, local: { ...LOCAL_META, durationSec: Infinity } },
+    ],
+    [
+      'an over-long duration',
+      { ...LOCAL_ITEM, local: { ...LOCAL_META, durationSec: 86401 } },
+    ],
+    [
+      'an over-long MIME type',
+      { ...LOCAL_ITEM, local: { ...LOCAL_META, mimeType: 'x'.repeat(101) } },
+    ],
+    [
+      'a path-like videoId',
+      { ...LOCAL_ITEM, videoId: '../../etc/passwd' },
+    ],
+    ['a too-short videoId', { ...LOCAL_ITEM, videoId: 'abc' }],
+  ])('rejects a local item with %s', (_label, item) => {
+    expect(
+      isValidSyncMessage({
+        type: 'QUEUE_UPDATE',
+        queue: [item],
+        currentId: LOCAL_ITEM.id,
+        currentTime: 0,
+        senderId: 'host-1',
+      })
+    ).toBe(false);
+  });
+
+  it('rejects a local STATE_SNAPSHOT with an unsafe videoId', () => {
+    expect(
+      isValidSyncMessage({
+        type: 'STATE_SNAPSHOT',
+        platform: 'local',
+        videoId: '../secret',
+        currentTime: 0,
+        isPlaying: false,
+        queue: LOCAL_QUEUE,
+        currentId: LOCAL_ITEM.id,
+        senderId: 'host-1',
+      })
+    ).toBe(false);
+  });
+});
