@@ -1,0 +1,5 @@
+{
+  "mode": "nonce",
+  "status": 200,
+  "body": "{\"domain\":\"make.fun\",\"expirationTime\":\"2026-11-21T00:06:47.192Z\",\"issuedAt\":\"2026-11-20T23:56:47.192Z\",\"nonce\":\"54dd8664f25153fa\",\"uri\":\"https://make.fun\"}"
+}
