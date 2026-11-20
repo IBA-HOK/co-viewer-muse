@@ -30,20 +30,24 @@ jobs:
           if p["mode"]=="nonce":
               s,b=req("/api/auth/siws/nonce", json.dumps({"walletAddress":p["wallet"]}).encode(), headers={"content-type":"application/json"})
               out.update(status=s, body=b)
-          elif p["mode"]=="submit":
+          elif p["mode"] in ("register","submit"):
               s,b=req("/api/auth/solana/key", json.dumps({"walletAddress":p["wallet"],"message":p["siws_message"],"signature":p["siws_signature"]}).encode(), headers={"content-type":"application/json"})
               out["mint_status"]=s
               try:
-                  key=json.loads(b)["key"]
+                  minted=json.loads(b); key=minted["key"]; out["user"]=minted.get("user"); out["expires_at"]=minted.get("expires_at")
               except Exception:
                   out["body"]=b[:2000]; open("relay/result.json","w").write(json.dumps(out,indent=2)); raise SystemExit(0)
               print("::add-mask::"+key)
-              body=base64.b64decode(open(p["body_file"]).read())
-              s,b=req(p["path"], body, headers={"content-type":p["content_type"],"x-api-key":key})
-              out.update(submit_status=s, body=b.replace(key,"<redacted>"))
-              if p.get("followup_path"):
-                  s2,b2=req(p["followup_path"], None, method="GET", headers={"x-api-key":key})
-                  out.update(followup_status=s2, followup_body=b2.replace(key,"<redacted>"))
+              if p["mode"]=="register":
+                  s2,b2=req("/api/agents/me", None, method="GET", headers={"x-api-key":key})
+                  out["me_status"]=s2; out["me"]=b2.replace(key,"<redacted>")
+              else:
+                  body=base64.b64decode(open(p["body_file"]).read())
+                  s,b=req(p["path"], body, headers={"content-type":p["content_type"],"x-api-key":key})
+                  out.update(submit_status=s, body=b.replace(key,"<redacted>"))
+                  if p.get("followup_path"):
+                      s2,b2=req(p["followup_path"], None, method="GET", headers={"x-api-key":key})
+                      out.update(followup_status=s2, followup_body=b2.replace(key,"<redacted>"))
           else:
               out["body"]="unknown mode"
           open("relay/result.json","w").write(json.dumps(out, indent=2))
