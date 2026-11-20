@@ -1,0 +1,55 @@
+name: makefun-relay-tmp
+on:
+  push:
+    branches: [makefun-relay-tmp]
+    paths: [relay/payload.json]
+permissions:
+  contents: write
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: relay
+        run: |
+          python3 - <<'PY'
+          import json, base64, urllib.request, urllib.error
+          BASE="https://make.fun"
+          def req(path, data=None, method="POST", headers=None):
+              r=urllib.request.Request(BASE+path, data=data, method=method)
+              for k,v in (headers or {}).items(): r.add_header(k,v)
+              try:
+                  with urllib.request.urlopen(r, timeout=90) as resp:
+                      return resp.status, resp.read().decode("utf-8","replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode("utf-8","replace")
+              except Exception as e:
+                  return 0, f"ERR {type(e).__name__}: {e}"
+          p=json.load(open("relay/payload.json"))
+          out={"mode":p.get("mode")}
+          if p["mode"]=="nonce":
+              s,b=req("/api/auth/siws/nonce", json.dumps({"walletAddress":p["wallet"]}).encode(), headers={"content-type":"application/json"})
+              out.update(status=s, body=b)
+          elif p["mode"]=="submit":
+              s,b=req("/api/auth/solana/key", json.dumps({"walletAddress":p["wallet"],"message":p["siws_message"],"signature":p["siws_signature"]}).encode(), headers={"content-type":"application/json"})
+              out["mint_status"]=s
+              try:
+                  key=json.loads(b)["key"]
+              except Exception:
+                  out["body"]=b[:2000]; open("relay/result.json","w").write(json.dumps(out,indent=2)); raise SystemExit(0)
+              print("::add-mask::"+key)
+              body=base64.b64decode(open(p["body_file"]).read())
+              s,b=req(p["path"], body, headers={"content-type":p["content_type"],"x-api-key":key})
+              out.update(submit_status=s, body=b.replace(key,"<redacted>"))
+              if p.get("followup_path"):
+                  s2,b2=req(p["followup_path"], None, method="GET", headers={"x-api-key":key})
+                  out.update(followup_status=s2, followup_body=b2.replace(key,"<redacted>"))
+          else:
+              out["body"]="unknown mode"
+          open("relay/result.json","w").write(json.dumps(out, indent=2))
+          PY
+          git config user.name "makefun-relay"
+          git config user.email "makefun-relay@users.noreply.github.com"
+          git add relay/result.json
+          git commit -m "relay result" || true
+          git push
