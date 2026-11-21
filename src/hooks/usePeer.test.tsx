@@ -6,6 +6,7 @@ import { act, renderHook } from '@testing-library/react';
 import { usePeer, CONNECT_TIMEOUT_MS } from './usePeer';
 import type { UsePeerOptions } from './usePeer';
 import type { SyncMessage } from '../types';
+import { FILE_CHANNEL_LABEL } from '../transfer/fileTransfer';
 
 type Handler = (...args: unknown[]) => void;
 
@@ -13,6 +14,7 @@ const peerMock = vi.hoisted(() => {
   class MockDataConnection {
     peer: string;
     open = false;
+    label = '';
     metadata?: Record<string, unknown>;
     handlers = new Map<string, Handler[]>();
     send = vi.fn();
@@ -21,9 +23,13 @@ const peerMock = vi.hoisted(() => {
       this.emit('close');
     });
 
-    constructor(peer: string, opts?: { metadata?: Record<string, unknown> }) {
+    constructor(
+      peer: string,
+      opts?: { metadata?: Record<string, unknown>; label?: string }
+    ) {
       this.peer = peer;
       this.metadata = opts?.metadata;
+      this.label = opts?.label ?? '';
     }
 
     on(event: string, cb: Handler): this {
@@ -79,11 +85,16 @@ const peerMock = vi.hoisted(() => {
       for (const cb of [...(this.handlers.get(event) ?? [])]) cb(...args);
     }
 
-    connect = vi.fn((id: string, opts?: { metadata?: Record<string, unknown> }) => {
-      const conn = new MockDataConnection(id, opts);
-      this.connections.push(conn);
-      return conn;
-    });
+    connect = vi.fn(
+      (
+        id: string,
+        opts?: { metadata?: Record<string, unknown>; label?: string }
+      ) => {
+        const conn = new MockDataConnection(id, opts);
+        this.connections.push(conn);
+        return conn;
+      }
+    );
   }
 
   return { MockPeer, MockDataConnection };
@@ -515,6 +526,95 @@ describe('usePeer · host incoming connection timeout', () => {
     expect(opts.onGuestDisconnected).toHaveBeenCalledTimes(1);
     expect(opts.onGuestDisconnected).toHaveBeenCalledWith('guest-1');
     expect(conn2.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('usePeer · labelled file channel', () => {
+  beforeEach(() => {
+    peerMock.MockPeer.instances.length = 0;
+    vi.clearAllMocks();
+  });
+
+  it('host routes a labelled connection away from the main guest registry', () => {
+    const opts = makeOptions(null);
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'host-1'));
+
+    const events: unknown[] = [];
+    act(() => {
+      result.current.fileChannel.subscribe((event) => events.push(event));
+    });
+
+    const fileConn = new peerMock.MockDataConnection('guest-1', {
+      label: FILE_CHANNEL_LABEL,
+    });
+    act(() => peer.emit('connection', fileConn));
+
+    // A file connection must not become the guest's sync connection.
+    expect(opts.onGuestConnected).not.toHaveBeenCalled();
+
+    act(() => openConn(fileConn));
+    act(() => fileConn.emit('data', new ArrayBuffer(8)));
+
+    expect(events).toContainEqual({ kind: 'open', peerId: 'guest-1' });
+    expect(events).toContainEqual({
+      kind: 'data',
+      peerId: 'guest-1',
+      data: expect.any(ArrayBuffer),
+    });
+
+    // The normal connection still registers and receives broadcasts.
+    const syncConn = new peerMock.MockDataConnection('guest-1', {
+      metadata: { name: 'Alice' },
+    });
+    act(() => peer.emit('connection', syncConn));
+    act(() => openConn(syncConn));
+    expect(opts.onGuestConnected).toHaveBeenCalledWith('guest-1', 'Alice');
+
+    const msg = makeMsg(1);
+    act(() => result.current.broadcast(msg));
+    expect(syncConn.send).toHaveBeenCalledWith(msg);
+    expect(fileConn.send).not.toHaveBeenCalled();
+
+    // Sending binary explicitly targets the file connection.
+    act(() => {
+      expect(result.current.fileChannel.send('guest-1', msg)).toBe(true);
+    });
+    expect(fileConn.send).toHaveBeenCalledWith(msg);
+    expect(syncConn.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('guest accepts a labelled connection without replacing the host sync conn', () => {
+    const opts = makeOptions('room-1');
+    const { result } = renderHook(() => usePeer(opts));
+
+    const peer = peerMock.MockPeer.instances[0];
+    act(() => peer.emit('open', 'guest-self'));
+    const syncConn = peer.connections[0];
+
+    const events: unknown[] = [];
+    act(() => {
+      result.current.fileChannel.subscribe((event) => events.push(event));
+    });
+
+    const fileConn = new peerMock.MockDataConnection('host-1', {
+      label: FILE_CHANNEL_LABEL,
+    });
+    act(() => peer.emit('connection', fileConn));
+    act(() => openConn(fileConn));
+
+    expect(result.current.connected).toBe(false);
+    expect(events).toContainEqual({ kind: 'open', peerId: 'host-1' });
+
+    // The sync connection is untouched: later broadcasts still use it.
+    act(() => openConn(syncConn));
+    expect(result.current.connected).toBe(true);
+    const msg = makeMsg(2);
+    act(() => result.current.broadcast(msg));
+    expect(syncConn.send).toHaveBeenCalledWith(msg);
+    expect(fileConn.send).not.toHaveBeenCalledWith(msg);
   });
 });
 

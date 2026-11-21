@@ -92,11 +92,18 @@ describe('useRoomSync · local file queue', () => {
       .find((msg) => msg.type === 'QUEUE_UPDATE');
     expect(queueUpdate).toBeDefined();
     expect(queueUpdate.queue[0].local).toEqual(LOCAL_META);
-    // Only metadata leaves the device — never a File/Blob/object URL.
+    // File bytes never travel in a sync message: distribution uses the
+    // dedicated PeerJS file channel. The sync contract only carries metadata
+    // (no File/Blob/object URL/binary payload).
     const serialized = JSON.stringify(queueUpdate);
     expect(serialized).not.toContain('blob:');
     expect(serialized).not.toContain('objectUrl');
     expect(queueUpdate.queue[0].local).not.toBeInstanceOf(Blob);
+    expect(serialized).not.toContain('ArrayBuffer');
+    for (const value of Object.values(queueUpdate.queue[0].local ?? {})) {
+      expect(value).not.toBeInstanceOf(Blob);
+      expect(value).not.toBeInstanceOf(ArrayBuffer);
+    }
   });
 
   it('keeps YouTube/Niconico items free of a local field', () => {

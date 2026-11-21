@@ -2,6 +2,7 @@ import {
   MAX_LOCAL_DURATION_SEC,
   MAX_LOCAL_FILE_NAME_LENGTH,
   MAX_LOCAL_MIME_LENGTH,
+  type LocalMediaIntegrity,
   type LocalMediaMeta,
 } from './types';
 
@@ -43,6 +44,75 @@ export function createLocalMediaId(): string {
   }
   const random = Math.random().toString(36).slice(2, 12);
   return `${Date.now().toString(36)}${random}`;
+}
+
+/** Bytes hashed for each start / middle / end sample. */
+export const LOCAL_INTEGRITY_SAMPLE_SIZE = 64 * 1024;
+
+/**
+ * Pick the byte offsets to sample for a content fingerprint. Small files are
+ * hashed whole (a single sample); larger files use start / middle / end.
+ */
+export function localIntegritySampleOffsets(
+  sizeBytes: number,
+  sampleSize = LOCAL_INTEGRITY_SAMPLE_SIZE
+): number[] {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return [0];
+  if (sizeBytes <= sampleSize * 3) return [0];
+  const middle = Math.floor((sizeBytes - sampleSize) / 2);
+  return [0, middle, sizeBytes - sampleSize];
+}
+
+function toHex(buffer: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function sha256Hex(data: ArrayBuffer): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new Error('この環境ではファイルの照合を行えません');
+  }
+  return toHex(await subtle.digest('SHA-256', data));
+}
+
+/**
+ * Compute the sampled fingerprint of a file/Blob. Only a few 64 KiB slices are
+ * read, so even a 1 GB file does not block for long.
+ */
+export async function computeLocalMediaIntegrity(
+  file: Blob,
+  sampleSize = LOCAL_INTEGRITY_SAMPLE_SIZE
+): Promise<LocalMediaIntegrity> {
+  const offsets = localIntegritySampleOffsets(file.size, sampleSize);
+  const hashes: string[] = [];
+  for (const offset of offsets) {
+    const length = Math.min(sampleSize, Math.max(0, file.size - offset));
+    const slice = file.slice(offset, offset + length);
+    hashes.push(await sha256Hex(await slice.arrayBuffer()));
+  }
+  return { algorithm: 'SHA-256', sampleSize, offsets, hashes };
+}
+
+/** True when the file's sampled fingerprint matches the declared one. */
+export async function verifyLocalMediaIntegrity(
+  file: Blob,
+  integrity: LocalMediaIntegrity
+): Promise<boolean> {
+  if (file.size <= 0) return false;
+  const actual = await computeLocalMediaIntegrity(file, integrity.sampleSize);
+  if (
+    actual.offsets.length !== integrity.offsets.length ||
+    actual.hashes.length !== integrity.hashes.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < actual.offsets.length; i += 1) {
+    if (actual.offsets[i] !== integrity.offsets[i]) return false;
+    if (actual.hashes[i] !== integrity.hashes[i]) return false;
+  }
+  return true;
 }
 
 /**

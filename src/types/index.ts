@@ -13,9 +13,27 @@ export interface Participant {
 }
 
 /**
+ * Sampled content fingerprint for a local file.
+ *
+ * Only a few small slices (start / middle / end, or the whole file when it is
+ * smaller than that) are hashed. A full-file hash is deliberately not required:
+ * it would need an incremental worker for large files and is not necessary to
+ * tell the host's copy apart from a different encode/edit.
+ */
+export interface LocalMediaIntegrity {
+  algorithm: 'SHA-256';
+  /** Number of bytes hashed per sample. */
+  sampleSize: number;
+  /** Byte offsets of the hashed samples, in file order. */
+  offsets: number[];
+  /** Lower-case hex SHA-256 digests of the samples at `offsets`. */
+  hashes: string[];
+}
+
+/**
  * Identity metadata for a local file, shared over the existing sync messages.
- * A file path is deliberately never included: each participant picks their own
- * copy of the file from their own device.
+ * A file path is deliberately never included. Metadata describes the file; the
+ * bytes themselves only travel over the dedicated file-transfer channel.
  */
 export interface LocalMediaMeta {
   /** Display / auxiliary match value (1..255 characters). */
@@ -26,7 +44,60 @@ export interface LocalMediaMeta {
   durationSec: number;
   /** `File.type`; may be an empty string. */
   mimeType: string;
+  /** Optional full-file digest, reserved for a future incremental hasher. */
+  contentHash?: string;
+  /** Sampled digest used to verify a received copy (hosts always send this). */
+  integrity?: LocalMediaIntegrity;
 }
+
+/** Explicit phases of a single local-file distribution. */
+export type FileTransferPhase =
+  | 'idle'
+  | 'offering'
+  | 'transferring'
+  | 'verifying'
+  | 'ready'
+  | 'error'
+  | 'cancelled';
+
+interface FileTransferBase {
+  videoId: string;
+  meta: LocalMediaMeta;
+}
+
+/**
+ * State machine for the guest-side receive flow. The discriminator makes the
+ * allowed transitions explicit and keeps the UI from inventing ad-hoc flags.
+ */
+export type FileTransferStatus =
+  | { phase: 'idle' }
+  | ({ phase: 'offering' } & FileTransferBase)
+  | ({
+      phase: 'transferring';
+      receivedBytes: number;
+      totalBytes: number;
+    } & FileTransferBase)
+  | ({
+      phase: 'verifying';
+      receivedBytes: number;
+      totalBytes: number;
+    } & FileTransferBase)
+  | ({
+      phase: 'ready';
+      receivedBytes: number;
+      totalBytes: number;
+    } & FileTransferBase)
+  | ({
+      phase: 'error';
+      message: string;
+      retryable: boolean;
+      /** The file is too large (or unverifiable): fall back to picking locally. */
+      fallbackToManual: boolean;
+    } & FileTransferBase)
+  | ({
+      phase: 'cancelled';
+      reason: string;
+    } & FileTransferBase);
 
 /** A single queued video. `id` is `${platform}:${videoId}` for dedupe. */
 export interface QueueItem {
@@ -187,9 +258,59 @@ function isQueueItem(value: unknown): value is QueueItem {
   );
 }
 
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
+
+export function isLocalMediaIntegrity(
+  value: unknown
+): value is LocalMediaIntegrity {
+  if (!isRecord(value)) return false;
+  if (value.algorithm !== 'SHA-256') return false;
+  if (
+    !Number.isSafeInteger(value.sampleSize) ||
+    (value.sampleSize as number) <= 0 ||
+    (value.sampleSize as number) > 4 * 1024 * 1024
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(value.offsets) ||
+    value.offsets.length < 1 ||
+    value.offsets.length > 3 ||
+    !value.offsets.every(
+      (offset) =>
+        Number.isSafeInteger(offset) && (offset as number) >= 0
+    )
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(value.hashes) ||
+    value.hashes.length !== value.offsets.length ||
+    !value.hashes.every(
+      (hash) => typeof hash === 'string' && SHA256_HEX_RE.test(hash)
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /** Validate a `LocalMediaMeta` received from an untrusted transport. */
 export function isLocalMediaMeta(value: unknown): value is LocalMediaMeta {
   if (!isRecord(value)) return false;
+  if (
+    value.contentHash !== undefined &&
+    (typeof value.contentHash !== 'string' ||
+      !SHA256_HEX_RE.test(value.contentHash))
+  ) {
+    return false;
+  }
+  if (
+    value.integrity !== undefined &&
+    !isLocalMediaIntegrity(value.integrity)
+  ) {
+    return false;
+  }
   return (
     typeof value.fileName === 'string' &&
     value.fileName.length >= 1 &&

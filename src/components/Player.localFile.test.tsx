@@ -6,6 +6,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import type { MutableRefObject } from 'react';
 import { Player, type PlayerProps } from './Player';
 import type {
+  FileTransferStatus,
   LocalMediaMeta,
   LocalPlayerEvent,
   PlayerController,
@@ -147,6 +148,67 @@ describe('Player · local file', () => {
     expect(screen.getByTestId('local-file-video')).toBeTruthy();
     expect(screen.getByText('holiday.mp4')).toBeTruthy();
     expect(screen.getByText(/AUDIO ONLY/)).toBeTruthy();
+  });
+
+  it('shows the host transfer wait state instead of a file picker', () => {
+    renderPlayer({
+      localTransferEnabled: true,
+      localTransfer: { phase: 'offering', videoId: 'local-abcdefgh', meta: META },
+    });
+    expect(screen.getByText('ホストからの受信待ち')).toBeTruthy();
+    expect(screen.queryByTestId('local-file-input')).toBeNull();
+    expect(screen.getByTestId('local-file-phase').textContent).toContain('受信待ち');
+  });
+
+  it('shows transfer progress while receiving', () => {
+    const status: FileTransferStatus = {
+      phase: 'transferring',
+      videoId: 'local-abcdefgh',
+      meta: META,
+      receivedBytes: 512,
+      totalBytes: 1024,
+    };
+    renderPlayer({ localTransferEnabled: true, localTransfer: status });
+    expect(screen.getByTestId('local-transfer-progress')).toBeTruthy();
+    expect(screen.getByText(/50%/)).toBeTruthy();
+    expect(screen.queryByTestId('local-file-input')).toBeNull();
+  });
+
+  it('offers a retry after a verification failure', () => {
+    const onRetryLocalTransfer = vi.fn();
+    const status: FileTransferStatus = {
+      phase: 'error',
+      videoId: 'local-abcdefgh',
+      meta: META,
+      message: '照合できませんでした。',
+      retryable: true,
+      fallbackToManual: false,
+    };
+    renderPlayer({
+      localTransferEnabled: true,
+      localTransfer: status,
+      onRetryLocalTransfer,
+    });
+    fireEvent.click(screen.getByRole('button', { name: '再試行' }));
+    expect(onRetryLocalTransfer).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('local-file-input')).toBeNull();
+  });
+
+  it('falls back to the manual picker for an oversized file', () => {
+    const status: FileTransferStatus = {
+      phase: 'error',
+      videoId: 'local-abcdefgh',
+      meta: META,
+      message: 'ファイルが大きすぎるため自動受信できません。',
+      retryable: false,
+      fallbackToManual: true,
+    };
+    renderPlayer({
+      localTransferEnabled: true,
+      localTransfer: status,
+    });
+    expect(screen.getByTestId('local-file-input')).toBeTruthy();
+    expect(screen.getByText(/大きすぎる/)).toBeTruthy();
   });
 
   it('does not mount a local video for a drive-mode guest', () => {

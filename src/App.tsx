@@ -16,11 +16,14 @@ import VolumeMixerPanel from './components/VolumeMixerPanel';
 import { computeUnreadChatCount } from './chatUnread';
 import { scheduleResumeRetries, type ResumeRetryScheduler } from './playbackResume';
 import {
+  computeLocalMediaIntegrity,
   createLocalMediaId,
   matchLocalFile,
   probeLocalMedia,
   type LocalMatchResult,
 } from './localFile';
+import { useFileTransfer, type CurrentLocalFile } from './hooks/useFileTransfer';
+import { getMaxTransferBytes } from './transfer/fileTransfer';
 import type { LocalQueueStatus } from './components/QueuePanel';
 import {
   cancelNicknameBroadcast,
@@ -446,13 +449,24 @@ export default function App() {
     [roomSync, transport.isHost]
   );
 
-  /** Host/Controller path: probe, bind and enqueue one local file. */
+  /**
+   * Host/Controller path: fingerprint, bind and enqueue one local file.
+   * The sampled fingerprint is part of the shared metadata so a receiving guest
+   * can verify the bytes it assembled.
+   */
   const handleAddLocalFile = useCallback(
-    (file: File, meta: LocalMediaMeta) => {
+    async (file: File, meta: LocalMediaMeta) => {
       if (!roomSync.canQueue) return;
+      let sharedMeta = meta;
+      try {
+        sharedMeta = { ...meta, integrity: await computeLocalMediaIntegrity(file) };
+      } catch {
+        // Hashing is unavailable (old browser / insecure context). The file is
+        // still playable locally, but transfer verification cannot pass.
+      }
       const videoId = createLocalMediaId();
-      bindLocalFile(videoId, file, meta, matchLocalFile(meta, meta));
-      roomSync.localLoadMedia('local', videoId, meta);
+      bindLocalFile(videoId, file, sharedMeta, matchLocalFile(sharedMeta, sharedMeta));
+      roomSync.localLoadMedia('local', videoId, sharedMeta);
     },
     [bindLocalFile, roomSync]
   );
@@ -574,6 +588,80 @@ export default function App() {
     currentLocalItem && localPending?.videoId === currentLocalItem.videoId
       ? localPending
       : null;
+
+  /** v1 file distribution is PeerJS-only; MQTT keeps the manual select flow. */
+  const fileTransferEnabled = transportKind === 'peerjs';
+
+  const hasLocalFile = useCallback(
+    (videoId: string) => localFilesRef.current.has(videoId),
+    []
+  );
+
+  const handleFileReceived = useCallback(
+    (videoId: string, file: File, meta: LocalMediaMeta) => {
+      const hostItem = roomSync.queue.find(
+        (q) => q.platform === 'local' && q.videoId === videoId
+      );
+      const hostMeta = hostItem?.local ?? meta;
+      bindLocalFile(videoId, file, meta, matchLocalFile(hostMeta, meta));
+    },
+    [bindLocalFile, roomSync.queue]
+  );
+
+  const transferPeers = useMemo(
+    () =>
+      roomSync.participants
+        .filter((p) => !p.isHost && p.peerId !== transport.myId)
+        .map((p) => p.peerId),
+    [roomSync.participants, transport.myId]
+  );
+
+  const currentLocalForTransfer = useMemo<CurrentLocalFile | null>(() => {
+    if (!transport.isHost || !currentLocalItem?.local || !currentLocalEntry) {
+      return null;
+    }
+    return {
+      videoId: currentLocalItem.videoId,
+      file: currentLocalEntry.file,
+      meta: currentLocalItem.local,
+    };
+  }, [transport.isHost, currentLocalItem, currentLocalEntry]);
+
+  const fileTransfer = useFileTransfer({
+    enabled: fileTransferEnabled,
+    isHost: transport.isHost,
+    myId: transport.myId,
+    hostPeerId: transport.roomId,
+    peers: transferPeers,
+    currentLocal: currentLocalForTransfer,
+    activeVideoId: currentLocalItem?.videoId ?? null,
+    connectionAlive: transport.connected,
+    hasLocalFile,
+    channel: peerTransport.fileChannel,
+    onFileReceived: handleFileReceived,
+  });
+
+  const currentLocalTooLarge =
+    !!currentLocalItem?.local &&
+    currentLocalItem.local.sizeBytes > getMaxTransferBytes();
+
+  const localTransferStatus = useMemo(() => {
+    if (currentLocalTooLarge && currentLocalItem?.local) {
+      return {
+        phase: 'error' as const,
+        videoId: currentLocalItem.videoId,
+        meta: currentLocalItem.local,
+        message:
+          'ファイルが大きすぎるため自動受信できません。各自の端末でファイルを選択してください。',
+        retryable: false,
+        fallbackToManual: true,
+      };
+    }
+    const status = fileTransfer.status;
+    if (status.phase === 'idle') return status;
+    if (status.videoId !== currentLocalItem?.videoId) return null;
+    return status;
+  }, [currentLocalItem, currentLocalTooLarge, fileTransfer.status]);
 
   const localStatus = useMemo(() => {
     const status: Record<string, LocalQueueStatus> = {};
@@ -1024,6 +1112,10 @@ export default function App() {
               }}
               onConfirmLocalFile={handleConfirmLocalFile}
               onCancelLocalFile={handleCancelLocalFile}
+              localTransfer={localTransferStatus}
+              localTransferEnabled={fileTransferEnabled && !currentLocalTooLarge}
+              onRetryLocalTransfer={fileTransfer.retry}
+              onCancelLocalTransfer={fileTransfer.cancel}
             />
             </div>
           </div>
@@ -1087,6 +1179,11 @@ export default function App() {
                 <BrowserPanel onAddToQueue={handleLoadMedia} canQueue={roomSync.canQueue} />
                 <LocalFilePanel
                   canQueue={roomSync.canQueue}
+                  canUpload={
+                    fileTransferEnabled
+                      ? transport.isHost && roomSync.canQueue
+                      : roomSync.canQueue
+                  }
                   onAddFile={handleAddLocalFile}
                 />
                 <ChatPanel
@@ -1356,6 +1453,11 @@ export default function App() {
             <div className="lg:col-span-12">
               <LocalFilePanel
                 canQueue={roomSync.canQueue}
+                canUpload={
+                  fileTransferEnabled
+                    ? transport.isHost && roomSync.canQueue
+                    : roomSync.canQueue
+                }
                 onAddFile={handleAddLocalFile}
               />
             </div>

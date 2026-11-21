@@ -5,8 +5,10 @@ import { useNiconicoPlayer } from '../hooks/useNiconicoPlayer';
 import { useLocalFilePlayer } from '../hooks/useLocalFilePlayer';
 import { nicoThumbnailUrl } from '../nicoThumbnail';
 import { formatBytes, formatDuration, type LocalMatchResult } from '../localFile';
+import { transferRatio } from '../transfer/fileTransfer';
 import {
   toWatchUrl,
+  type FileTransferStatus,
   type LocalMediaMeta,
   type LocalPlayerEvent,
   type Platform,
@@ -60,6 +62,12 @@ export interface PlayerProps {
   onSelectLocalFile?: (file: File) => void;
   onConfirmLocalFile?: () => void;
   onCancelLocalFile?: () => void;
+  /** Guest receive state when the host distributes the file over PeerJS. */
+  localTransfer?: FileTransferStatus | null;
+  /** True when the guest should receive automatically instead of picking. */
+  localTransferEnabled?: boolean;
+  onRetryLocalTransfer?: () => void;
+  onCancelLocalTransfer?: () => void;
 }
 
 function YouTubeInner(props: PlayerProps) {
@@ -236,9 +244,40 @@ function LocalFilePicker(props: {
   );
 }
 
+function transferPhaseLabel(status: FileTransferStatus): string {
+  switch (status.phase) {
+    case 'offering':
+      return '受信待ち';
+    case 'transferring':
+      return '受信中';
+    case 'verifying':
+      return '照合中';
+    case 'ready':
+      return '準備中';
+    case 'error':
+      return 'エラー';
+    case 'cancelled':
+      return 'キャンセル';
+    default:
+      return '受信待ち';
+  }
+}
+
 function LocalFilePrompt(props: PlayerProps) {
   const meta = props.localMeta;
   const pending = props.localPending;
+  const transfer: FileTransferStatus = props.localTransfer ?? { phase: 'idle' };
+  const tooLargeFallback =
+    transfer.phase === 'error' && transfer.fallbackToManual;
+  const autoReceive = !!props.localTransferEnabled && !tooLargeFallback;
+  const showProgress =
+    autoReceive &&
+    (transfer.phase === 'transferring' || transfer.phase === 'verifying');
+  const ratio =
+    transfer.phase === 'transferring' || transfer.phase === 'verifying'
+      ? transferRatio(transfer.receivedBytes, transfer.totalBytes)
+      : 0;
+
   return (
     <div
       className={`flex flex-col items-center justify-center gap-3 p-6 text-center bg-black ${
@@ -249,7 +288,9 @@ function LocalFilePrompt(props: PlayerProps) {
       <div className="flex h-12 w-12 items-center justify-center border border-[var(--nothing-border)] bg-[var(--nothing-surface)]">
         <span className="text-lg text-[var(--nothing-text-dim)]">◇</span>
       </div>
-      <p className="nothing-label">LOCAL FILE · 未選択</p>
+      <p className="nothing-label" data-testid="local-file-phase">
+        LOCAL FILE · {autoReceive ? transferPhaseLabel(transfer) : '未選択'}
+      </p>
       {meta && (
         <div className="space-y-1">
           <p className="nothing-mono max-w-md truncate text-sm text-[var(--nothing-text)]">
@@ -261,11 +302,108 @@ function LocalFilePrompt(props: PlayerProps) {
           </p>
         </div>
       )}
-      <p className="max-w-md text-xs leading-relaxed text-[var(--nothing-text-muted)]">
-        ホストと同じファイルを選択してください。ファイルの内容が送信されることはありません。
-      </p>
 
-      {pending && (
+      {autoReceive && transfer.phase === 'transferring' && (
+        <div className="w-full max-w-md space-y-1" data-testid="local-transfer-progress">
+          <div className="h-1 w-full bg-[var(--nothing-surface-raised)]">
+            <div
+              className="h-full bg-[var(--nothing-red)] transition-[width] duration-150"
+              style={{ width: `${Math.round(ratio * 100)}%` }}
+            />
+          </div>
+          <p className="nothing-mono text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
+            {formatBytes(transfer.receivedBytes)} / {formatBytes(transfer.totalBytes)} ·{' '}
+            {Math.round(ratio * 100)}%
+          </p>
+        </div>
+      )}
+
+      {autoReceive && transfer.phase === 'verifying' && showProgress && (
+        <p className="nothing-mono text-[10px] tracking-widest text-[var(--nothing-text-dim)]">
+          {formatBytes(transfer.receivedBytes)} / {formatBytes(transfer.totalBytes)} · 照合中
+        </p>
+      )}
+
+      {autoReceive &&
+        (transfer.phase === 'idle' ||
+          transfer.phase === 'offering' ||
+          transfer.phase === 'verifying' ||
+          transfer.phase === 'ready') && (
+          <p className="nothing-mono text-xs text-[var(--nothing-text-muted)]">
+            {transfer.phase === 'verifying'
+              ? '受信したファイルを照合中…'
+              : transfer.phase === 'ready'
+                ? '再生を準備中…'
+                : 'ホストからの受信待ち'}
+          </p>
+        )}
+
+      {autoReceive &&
+        (transfer.phase === 'error' || transfer.phase === 'cancelled') && (
+          <div className="w-full max-w-md space-y-2 border border-[var(--nothing-border)] bg-[var(--nothing-surface-raised)] px-3 py-2">
+            <p
+              className={`nothing-mono text-[11px] leading-relaxed ${
+                transfer.phase === 'error'
+                  ? 'text-[var(--nothing-red)]'
+                  : 'text-[var(--nothing-text-muted)]'
+              }`}
+            >
+              {transfer.phase === 'error'
+                ? `⚠ ${transfer.message}`
+                : '受信をキャンセルしました'}
+            </p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {(transfer.phase === 'cancelled' || transfer.retryable) &&
+                props.onRetryLocalTransfer && (
+                  <button
+                    type="button"
+                    onClick={props.onRetryLocalTransfer}
+                    className="nothing-mono bg-[var(--nothing-red)] px-3 py-1 text-xs tracking-widest text-white hover:bg-[var(--nothing-red-hover)]"
+                  >
+                    再試行
+                  </button>
+                )}
+              {props.onCancelLocalTransfer &&
+                !tooLargeFallback &&
+                (transfer.phase === 'error' || transfer.phase === 'cancelled') && (
+                  <button
+                    type="button"
+                    onClick={props.onCancelLocalTransfer}
+                    className="nothing-mono border border-[var(--nothing-border)] bg-black px-3 py-1 text-xs tracking-widest text-[var(--nothing-text-dim)] hover:text-[var(--nothing-text)]"
+                  >
+                    閉じる
+                  </button>
+                )}
+            </div>
+          </div>
+        )}
+
+      {autoReceive &&
+        (transfer.phase === 'offering' || transfer.phase === 'transferring') &&
+        props.onCancelLocalTransfer && (
+          <button
+            type="button"
+            onClick={props.onCancelLocalTransfer}
+            className="nothing-mono border border-[var(--nothing-border)] bg-black px-3 py-1 text-xs tracking-widest text-[var(--nothing-text-dim)] hover:text-[var(--nothing-text)]"
+          >
+            キャンセル
+          </button>
+        )}
+
+      {!autoReceive && (
+        <>
+          {tooLargeFallback && transfer.phase === 'error' && (
+            <p className="nothing-mono max-w-md text-[11px] leading-relaxed text-[var(--nothing-text-muted)]">
+              {transfer.message}
+            </p>
+          )}
+          <p className="max-w-md text-xs leading-relaxed text-[var(--nothing-text-muted)]">
+            ホストと同じファイルを選択してください。
+          </p>
+        </>
+      )}
+
+      {!autoReceive && pending && (
         <div className="w-full max-w-md space-y-2 border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-left">
           <p className="nothing-mono text-[11px] leading-relaxed text-amber-300">
             ⚠ {pending.match.message}
@@ -293,21 +431,19 @@ function LocalFilePrompt(props: PlayerProps) {
         </div>
       )}
 
-      {props.localError && (
+      {!autoReceive && props.localError && (
         <p className="nothing-mono max-w-md border border-[var(--nothing-red)]/30 bg-[var(--nothing-red-dim)] px-2 py-1 text-xs text-[var(--nothing-red)]">
           ⚠ {props.localError}
         </p>
       )}
 
-      <LocalFilePicker
-        onSelectLocalFile={props.onSelectLocalFile}
-        label="ファイルを選択"
-        testId="local-file-input"
-      />
-      <p className="max-w-md text-[10px] leading-relaxed text-[var(--nothing-text-faint)]">
-        対応の目安: MP4 (H.264/AAC) / WebM / MP3 / M4A / WAV / OGG。
-        ブラウザがネイティブに再生できる形式のみ利用できます（トランスコードは行いません）。
-      </p>
+      {!autoReceive && (
+        <LocalFilePicker
+          onSelectLocalFile={props.onSelectLocalFile}
+          label="ファイルを選択"
+          testId="local-file-input"
+        />
+      )}
     </div>
   );
 }

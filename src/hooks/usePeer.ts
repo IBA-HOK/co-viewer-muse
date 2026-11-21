@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Peer from 'peerjs';
 import type { DataConnection, MediaConnection } from 'peerjs';
 import { isValidSyncMessage, MAX_CHAT_NAME_LENGTH, type SyncMessage } from '../types';
-import type { TransportTopology } from '../transport/types';
+import type {
+  TransportFileChannel,
+  TransportFileChannelEvent,
+  TransportTopology,
+} from '../transport/types';
+import { FILE_CHANNEL_LABEL } from '../transfer/fileTransfer';
 
 export interface UsePeerOptions {
   roomIdFromUrl: string | null;
@@ -32,6 +37,8 @@ export interface UsePeerResult {
   sendTo: (peerId: string, msg: SyncMessage) => void;
   callPeer: (peerId: string, stream: MediaStream) => MediaConnection | null;
   onCall: (cb: (call: MediaConnection) => void) => void;
+  /** Dedicated binary channel for file distribution (never the sync channel). */
+  fileChannel: TransportFileChannel;
   reconnect: () => void;
 }
 
@@ -69,6 +76,11 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
   const peerRef = useRef<Peer | null>(null);
   const hostConnRef = useRef<DataConnection | null>(null);
   const guestConnsRef = useRef<Map<string, DataConnection>>(new Map());
+  /** Dedicated file DataConnections, keyed by peer — never mixed with sync conns. */
+  const fileConnsRef = useRef<Map<string, DataConnection>>(new Map());
+  const fileSubscribersRef = useRef<
+    Set<(event: TransportFileChannelEvent) => void>
+  >(new Set());
   const isHostRef = useRef(false);
   const roomIdRef = useRef<string | null>(null);
   const nameRef = useRef(opts.displayName);
@@ -218,6 +230,137 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       hostConnectTimersRef.current.set(conn.peer, timer);
     },
     [clearHostConnectTimer]
+  );
+
+  const emitFileEvent = useCallback((event: TransportFileChannelEvent) => {
+    for (const subscriber of [...fileSubscribersRef.current]) {
+      try {
+        subscriber(event);
+      } catch (err) {
+        console.warn('[usePeer] file channel subscriber failed', err);
+      }
+    }
+  }, []);
+
+  /**
+   * Wire a file-only DataConnection. It never touches the main connection
+   * registries, so a file offer can never replace the room's sync channel.
+   */
+  const wireFileConn = useCallback(
+    (conn: DataConnection) => {
+      const isCurrentFileConn = (): boolean =>
+        fileConnsRef.current.get(conn.peer) === conn;
+
+      conn.on('data', (data) => {
+        if (!isCurrentFileConn()) return;
+        emitFileEvent({ kind: 'data', peerId: conn.peer, data });
+      });
+      conn.on('open', () => {
+        if (!isCurrentFileConn()) return;
+        emitFileEvent({ kind: 'open', peerId: conn.peer });
+      });
+      conn.on('close', () => {
+        if (!isCurrentFileConn()) return;
+        fileConnsRef.current.delete(conn.peer);
+        emitFileEvent({ kind: 'close', peerId: conn.peer });
+      });
+      conn.on('error', () => {
+        if (!isCurrentFileConn()) return;
+        fileConnsRef.current.delete(conn.peer);
+        emitFileEvent({ kind: 'close', peerId: conn.peer });
+        try {
+          conn.close();
+        } catch {
+          /* noop */
+        }
+      });
+    },
+    [emitFileEvent]
+  );
+
+  const acceptFileConn = useCallback(
+    (conn: DataConnection) => {
+      const previous = fileConnsRef.current.get(conn.peer);
+      fileConnsRef.current.set(conn.peer, conn);
+      wireFileConn(conn);
+      if (previous && previous !== conn) {
+        // Register the replacement first so the old close cannot delete it.
+        try {
+          previous.close();
+        } catch {
+          /* noop */
+        }
+      }
+    },
+    [wireFileConn]
+  );
+
+  const openFileChannel = useCallback(
+    (peerId: string) => {
+      const peer = peerRef.current;
+      if (!peer) return;
+      const existing = fileConnsRef.current.get(peerId);
+      if (existing) return;
+      const conn = peer.connect(peerId, {
+        label: FILE_CHANNEL_LABEL,
+        reliable: true,
+      });
+      fileConnsRef.current.set(peerId, conn);
+      wireFileConn(conn);
+    },
+    [wireFileConn]
+  );
+
+  const sendFileData = useCallback((peerId: string, data: unknown): boolean => {
+    const conn = fileConnsRef.current.get(peerId);
+    if (!conn || !conn.open) return false;
+    try {
+      // PeerJS accepts JSON objects and ArrayBuffers on the same connection.
+      conn.send(data);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const closeFileChannel = useCallback((peerId: string) => {
+    const conn = fileConnsRef.current.get(peerId);
+    if (!conn) return;
+    // Delete before closing so the close event is ignored by the identity guard.
+    fileConnsRef.current.delete(peerId);
+    try {
+      conn.close();
+    } catch {
+      /* noop */
+    }
+  }, []);
+
+  const isFileChannelOpen = useCallback(
+    (peerId: string) => !!fileConnsRef.current.get(peerId)?.open,
+    []
+  );
+
+  const fileBufferedAmount = useCallback((peerId: string): number => {
+    const conn = fileConnsRef.current.get(peerId);
+    if (!conn) return 0;
+    try {
+      const channelAmount = conn.dataChannel?.bufferedAmount;
+      if (typeof channelAmount === 'number') return channelAmount;
+      const buffered = (conn as unknown as { bufferSize?: number }).bufferSize;
+      return typeof buffered === 'number' ? buffered : 0;
+    } catch {
+      return 0;
+    }
+  }, []);
+
+  const subscribeFileChannel = useCallback(
+    (callback: (event: TransportFileChannelEvent) => void) => {
+      fileSubscribersRef.current.add(callback);
+      return () => {
+        fileSubscribersRef.current.delete(callback);
+      };
+    },
+    []
   );
 
   const wireConn = useCallback(
@@ -420,6 +563,12 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       });
 
       peer.on('connection', (conn) => {
+        // A file channel is not the room connection: keep it in its own map
+        // and leave the guest/host sync registration untouched.
+        if (conn.label === FILE_CHANNEL_LABEL) {
+          acceptFileConn(conn);
+          return;
+        }
         const prevConn = guestConnsRef.current.get(conn.peer);
         guestConnsRef.current.set(conn.peer, conn);
         wireConn(conn);
@@ -508,6 +657,15 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
       peerRef.current = null;
       hostConnRef.current = null;
       guestConnsRef.current.clear();
+      for (const conn of fileConnsRef.current.values()) {
+        try {
+          conn.close();
+        } catch {
+          /* noop */
+        }
+      }
+      fileConnsRef.current.clear();
+      fileSubscribersRef.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -522,6 +680,25 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
     callHandlerRef.current = cb;
   }, []);
 
+  const fileChannel = useMemo<TransportFileChannel>(
+    () => ({
+      open: openFileChannel,
+      send: sendFileData,
+      close: closeFileChannel,
+      isOpen: isFileChannelOpen,
+      bufferedAmount: fileBufferedAmount,
+      subscribe: subscribeFileChannel,
+    }),
+    [
+      closeFileChannel,
+      fileBufferedAmount,
+      isFileChannelOpen,
+      openFileChannel,
+      sendFileData,
+      subscribeFileChannel,
+    ]
+  );
+
   return {
     isHost,
     myId,
@@ -533,6 +710,7 @@ export function usePeer(opts: UsePeerOptions): UsePeerResult {
     reconnect,
     callPeer,
     onCall,
+    fileChannel,
   };
 }
 

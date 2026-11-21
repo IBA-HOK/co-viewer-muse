@@ -315,6 +315,61 @@ describe('isValidSyncMessage · local file metadata', () => {
     ).toBe(true);
   });
 
+  it('accepts sampled integrity metadata used by the file transfer', () => {
+    expect(
+      isValidSyncMessage({
+        type: 'QUEUE_UPDATE',
+        queue: [
+          {
+            ...LOCAL_ITEM,
+            local: {
+              ...LOCAL_META,
+              integrity: {
+                algorithm: 'SHA-256',
+                sampleSize: 65536,
+                offsets: [0, 100],
+                hashes: ['a'.repeat(64), 'b'.repeat(64)],
+              },
+            },
+          },
+        ],
+        currentId: LOCAL_ITEM.id,
+        currentTime: 10,
+        senderId: 'host-1',
+      })
+    ).toBe(true);
+  });
+
+  it.each([
+    [
+      'an unsupported integrity algorithm',
+      { algorithm: 'MD5', sampleSize: 65536, offsets: [0], hashes: ['a'.repeat(64)] },
+    ],
+    [
+      'a malformed sample hash',
+      { algorithm: 'SHA-256', sampleSize: 65536, offsets: [0], hashes: ['xyz'] },
+    ],
+    [
+      'mismatched offsets and hashes',
+      {
+        algorithm: 'SHA-256',
+        sampleSize: 65536,
+        offsets: [0, 10],
+        hashes: ['a'.repeat(64)],
+      },
+    ],
+  ])('rejects local metadata with %s', (_label, integrity) => {
+    expect(
+      isValidSyncMessage({
+        type: 'QUEUE_UPDATE',
+        queue: [{ ...LOCAL_ITEM, local: { ...LOCAL_META, integrity } }],
+        currentId: LOCAL_ITEM.id,
+        currentTime: 0,
+        senderId: 'host-1',
+      })
+    ).toBe(false);
+  });
+
   it('still accepts existing platforms without a local field', () => {
     expect(
       isValidSyncMessage({

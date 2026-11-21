@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  computeLocalMediaIntegrity,
   createLocalMediaId,
   formatBytes,
   formatDuration,
+  localIntegritySampleOffsets,
   matchLocalFile,
   probeLocalMedia,
+  verifyLocalMediaIntegrity,
 } from './localFile';
 import type { LocalMediaMeta } from './types';
 
@@ -73,6 +76,45 @@ describe('matchLocalFile', () => {
     expect(result.requiresConfirmation).toBe(false);
     expect(result.suppressEnd).toBe(true);
     expect(result.message).toContain('再生時間を確認できない');
+  });
+});
+
+describe('sampled file integrity', () => {
+  it('hashes small files as a single sample', () => {
+    expect(localIntegritySampleOffsets(1000, 1000)).toEqual([0]);
+  });
+
+  it('samples the start, middle and end of large files', () => {
+    const size = 1024 * 1024;
+    const offsets = localIntegritySampleOffsets(size, 64 * 1024);
+    expect(offsets).toHaveLength(3);
+    expect(offsets[0]).toBe(0);
+    expect(offsets[1]).toBeGreaterThan(0);
+    expect(offsets[2]).toBe(size - 64 * 1024);
+  });
+
+  it('matches the same bytes and rejects different bytes', async () => {
+    const file = new File([new Uint8Array([1, 2, 3, 4, 5])], 'a.bin');
+    const integrity = await computeLocalMediaIntegrity(file);
+    await expect(verifyLocalMediaIntegrity(file, integrity)).resolves.toBe(
+      true
+    );
+    const changed = new File([new Uint8Array([1, 2, 3, 4, 6])], 'a.bin');
+    await expect(
+      verifyLocalMediaIntegrity(changed, integrity)
+    ).resolves.toBe(false);
+  });
+
+  it('detects a change in the middle of a file larger than one sample', async () => {
+    const bytes = new Uint8Array(200000).fill(7);
+    const file = new File([bytes], 'a.bin');
+    const integrity = await computeLocalMediaIntegrity(file, 1024);
+    const edited = new Uint8Array(bytes);
+    edited[100000] = 8;
+    const changed = new File([edited], 'a.bin');
+    await expect(
+      verifyLocalMediaIntegrity(changed, integrity)
+    ).resolves.toBe(false);
   });
 });
 

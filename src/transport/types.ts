@@ -13,6 +13,29 @@ export interface TransportMediaCall {
   off?(event: string, callback: (...args: unknown[]) => void): void;
 }
 
+/** Events delivered by the dedicated file DataChannel (never the sync channel). */
+export type TransportFileChannelEvent =
+  | { kind: 'open'; peerId: string }
+  | { kind: 'close'; peerId: string }
+  | { kind: 'data'; peerId: string; data: unknown };
+
+/**
+ * Optional binary-capable side channel. PeerJS implements it with a dedicated
+ * DataConnection label; a JSON bus such as MQTT leaves it undefined so callers
+ * fall back to the manual local-file flow.
+ */
+export interface TransportFileChannel {
+  /** Open (or reuse) the file channel to `peerId`. */
+  open(peerId: string): void;
+  /** Queue one control object / binary chunk; false when the channel is closed. */
+  send(peerId: string, data: unknown): boolean;
+  close(peerId: string): void;
+  isOpen(peerId: string): boolean;
+  /** RTCDataChannel.bufferedAmount (0 when unavailable). */
+  bufferedAmount(peerId: string): number;
+  subscribe(callback: (event: TransportFileChannelEvent) => void): () => void;
+}
+
 export type TransportKind = 'peerjs' | 'mqtt';
 
 /**
@@ -58,6 +81,8 @@ export interface Transport {
   sendTo(peerId: string, msg: SyncMessage): void;
   callPeer?(peerId: string, stream: MediaStream): TransportMediaCall | null;
   onCall?(cb: (call: TransportMediaCall) => void): void;
+  /** Binary side channel; absent on transports that cannot carry file bytes. */
+  fileChannel?: TransportFileChannel;
   reconnect(): void;
   dispose?: () => void;
   pendingQueue?: readonly SyncMessage[];
